@@ -1,0 +1,46 @@
+export class NullgateAPIError extends Error {
+  readonly statusCode: number;
+  readonly requestId: string | null;
+  declare readonly detail: unknown;
+
+  constructor(statusCode: number, requestId: string | null, detail: unknown) {
+    super(
+      `Nullgate HTTP ${statusCode}${requestId ? ` (request_id=${requestId})` : ""}`,
+    );
+    this.name = "NullgateAPIError";
+    this.statusCode = statusCode;
+    this.requestId = requestId;
+    // Server validation details can echo private inputs; never include them in inspection.
+    Object.defineProperty(this, "detail", { value: detail, enumerable: false });
+  }
+}
+
+export class NullgateProtocolError extends Error {
+  readonly statusCode: number;
+  readonly requestId: string | null;
+
+  constructor(message: string, statusCode: number, requestId: string | null) {
+    super(
+      `Invalid Nullgate response: ${message}${requestId ? ` (request_id=${requestId})` : ""}`,
+    );
+    this.name = "NullgateProtocolError";
+    this.statusCode = statusCode;
+    this.requestId = requestId;
+  }
+}
+
+export class NullgateClosedError extends Error {
+  constructor(owner: "client" | "session") {
+    super(`Nullgate ${owner} is closed`);
+    this.name = "NullgateClosedError";
+  }
+}
+
+export class NullgateTransportError extends Error {
+  constructor() {
+    super(
+      "Nullgate generation request failed before a complete response was received",
+    );
+    this.name = "NullgateTransportError";
+  }
+}
