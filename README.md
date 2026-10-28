@@ -19,43 +19,113 @@ must be available, and npm must be allowed to install the package's development
 dependencies and run lifecycle scripts so TypeScript can build `dist/`. Do not
 use `--ignore-scripts` for this source install. The SDK is not released to npm.
 
-## Client and document lifetime
+## One generation
+
+Install `wreq-js@3.2.0` alongside the SDK for this target example. Set `TARGET_URL`
+and `NULLGATE_API_KEY`; use `NULLGATE_BASE_URL` and `ANALYTICS_URL` for an updated
+preview backend. `NULLGATE_IDENTITY` optionally supplies a stable identity UUID.
 
 ```ts
+import { randomUUID } from "node:crypto";
 import { NullgateClient, Page, SensorParams } from "@nullgate/sdk";
+import { createSession } from "wreq-js";
 
-export async function generateSensor(
-  client: NullgateClient,
-  page: Page,
-  script: string,
-  identity: string,
-  userAgent: string,
-) {
-  const candidates = client.findProtections(page, {
-    where: (protection) => protection.kind === "sensor",
+const targetURL = process.env.TARGET_URL;
+const apiKey = process.env.NULLGATE_API_KEY;
+if (!targetURL || !apiKey)
+  throw new Error("Set TARGET_URL and NULLGATE_API_KEY");
+const userAgent =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+const target = await createSession({
+  browser: "chrome_146",
+  os: "windows",
+  defaultHeaders: { "User-Agent": userAgent },
+});
+const client = new NullgateClient({
+  apiKey,
+  ...(process.env.NULLGATE_BASE_URL
+    ? { baseURL: process.env.NULLGATE_BASE_URL }
+    : {}),
+  ...(process.env.ANALYTICS_URL
+    ? { analyticsURL: process.env.ANALYTICS_URL }
+    : {}),
+});
+const session = client.open({
+  identity: process.env.NULLGATE_IDENTITY ?? randomUUID(),
+  userAgent,
+});
+try {
+  const response = await target.fetch(targetURL);
+  const page = new Page(response.url || targetURL, await response.text());
+  const [sensor] = client.findProtections(page, {
+    where: (candidate) => candidate.kind === "sensor",
   });
-  const protection = candidates[0];
-  if (candidates.length !== 1 || protection?.kind !== "sensor") {
-    throw new Error("Select exactly one sensor candidate before generation");
+  if (sensor?.kind === "sensor") {
+    const source = await target.fetch(sensor.scriptURL, {
+      headers: { Referer: page.url },
+      redirect: "manual",
+    });
+    if (!source.ok) throw new Error(`Script HTTP ${source.status}`);
+    const cookies = Object.fromEntries(
+      Object.entries(target.getCookies(page.url)).filter(
+        ([name]) => name === "_abck" || name === "bm_sz",
+      ),
+    );
+    const solution = await session.solve(
+      new SensorParams(sensor, await source.text(), { cookies }),
+    );
+    await solution.wait();
+    const result = await target.fetch(solution.url, {
+      method: solution.method,
+      headers: solution.headers,
+      body: solution.body,
+      redirect: "manual",
+    });
+    console.log(result.status, await result.text());
+  } else {
+    console.log("No sensor candidate found");
   }
-  const session = client.open({ identity, userAgent });
-  try {
-    return await session.solve(new SensorParams(protection, script));
-  } finally {
-    session.close();
-  }
+} finally {
+  session.close();
+  client.close();
+  await target.close();
 }
 ```
 
-Create the reusable client with `new NullgateClient({ apiKey })`; close it in your outer `finally` block. A returned solution can still report through its originating client until that client closes. `client.close()` aborts its active requests and closes all sessions. `session.close()` affects only that session. Both support `Symbol.asyncDispose`.
+This sends **one generation**, not a clearance verdict. The full
+[target example](examples/target.ts) also handles Pixel and SBSD parameters,
+without choosing among ambiguous candidates.
 
-A session belongs to one document and binds an identity UUID, user agent, optional timezone, and isolated `X-State-ID`. Calls in the same session are sequential even when submitted concurrently. Different sessions can run concurrently. Use a **new session for each new document**. The target cookie jar is separate and stays with your target HTTP provider.
+A client can serve multiple documents. A session belongs to **one document** and
+binds an identity UUID, user agent, optional timezone, and isolated `X-State-ID`.
+Keep the same session for further generations of that document; open a new
+session whenever a new document is fetched. Calls within a session are
+sequential; separate sessions can run concurrently. Keep the native target
+session and its cookie jar across documents.
+
+`session.close()` affects only that session. `client.close()` aborts active
+requests and closes all sessions. Both support `Symbol.asyncDispose`. A solution
+can report through its originating client until that client closes.
 
 ## Discovery and typed parameters
 
-`new Page(url, html)` stores caller-supplied content. `client.findProtections(page, { where? })` and the standalone `findProtections` are synchronous and never perform network requests or execute JavaScript.
+`new Page(url, html)` stores caller-supplied content.
+`client.findProtections(page, { where?, panic? })` and the standalone
+`findProtections` are synchronous and never fetch or execute JavaScript.
 
-Discovery returns a discriminated union of `Pixel`, `Sensor`, and `Sbsd`. Every candidate retains `page`, `scriptURL`, and its script-tag provenance. Pixel candidates additionally retain `challenge` and `challengeOffset`; ambiguous challenges and duplicate occurrences are not silently discarded. SBSD `blocking` means the raw `t` query parameter is present, including `t=`. Sensor discovery is a finite same-origin classic-script heuristic, not proof that the source contains a supported sensor. Unknown JavaScript assets are not solvers.
+Discovery always returns a list: no candidates means `[]`, and one candidate
+means a one-element list. The optional `where` predicate runs **before** the
+ambiguity check. More than one remaining candidate throws the exported
+`AmbiguousProtectionError` by default; its `candidates` property retains all
+matching candidates. Use `{ panic: false }` to inspect all candidates, optionally
+with `where`. No candidate is silently selected or deduplicated.
+
+Candidates are a discriminated union of `Pixel`, `Sensor`, and `Sbsd`. Each retains
+`page`, `scriptURL`, and script-tag provenance. Pixel also retains `challenge`
+and `challengeOffset`, including ambiguous challenges and duplicate occurrences.
+SBSD `blocking` means the raw `t` query parameter is present, including `t=`.
+Sensor discovery is a finite same-origin classic-script heuristic, not proof that
+the source contains a supported sensor. Unknown JavaScript assets are not solvers.
 
 Parameters are paired with their matching concrete protection:
 
@@ -88,16 +158,32 @@ npm ci
 node examples/target.ts
 ```
 
-Set `TARGET_URL` and `NULLGATE_API_KEY` before running. Optional settings are `TARGET_PROXY`, `NULLGATE_IDENTITY`, `NULLGATE_BASE_URL`, and `ANALYTICS_URL`.
+Set `TARGET_URL` and `NULLGATE_API_KEY` before running. Optional settings are
+`NULLGATE_IDENTITY`, `NULLGATE_BASE_URL`, and `ANALYTICS_URL`.
 
 Run the TypeScript example from the source checkout, not from `node_modules`:
 Node's native type stripping does not support `.ts` files inside dependencies.
 `npm ci` installs the locked native `wreq-js@3.2.0` example dependency and builds
 the SDK through `prepare`.
 
-The [complete target example](examples/target.ts) uses the maintained `wreq-js` native BoringSSL transport with `browser: "chrome_146"`, `os: "windows"`, a matching user agent, one cookie jar, and reused connections. It has no standard-client fallback. It fetches page/script content, generates, waits, and posts exact solution bytes. Sensor continuation uses `abckCounters`/`isEnough` with finite diagnostic ceilings. A closed cookie gate is not acceptance. Blocking SBSD is checked by fetching the original page again, never by treating POST 200 as clearance.
+The [complete target example](examples/target.ts) uses the maintained native
+`wreq-js` BoringSSL transport with `browser: "chrome_146"`, `os: "windows"`, and a
+matching user agent. It fetches one page and one script, constructs concrete
+parameters, generates once, waits, and POSTs the exact solution body and headers.
+It prints the target status and response body; it does not retry, automatically
+continue across documents, or claim clearance.
 
-Sensor generation receives only script-visible `_abck`/`bm_sz` cookies. SBSD receives the actual page-scoped script-visible cookie context. Native jar scoping owns domain/path/secure/expiry matching; the example excludes HttpOnly cookies and reports visibility ambiguity rather than guessing.
+Native `target.getCookies(page.url)` owns URL scoping. The explicit generation
+mapping keeps `_abck` and `bm_sz` for Sensor, and `bm_so`, `sbsd_o`, and `bm_s` for
+SBSD; missing names stay absent. Customer authentication cookies remain in the
+native jar for target requests, not in generation parameters. These getters
+are native HTTP-cookie access, not a reconstruction of `document.cookie`.
+
+If the document requires another generation, read the updated native cookies
+and solve again in the same Nullgate session. `abckCounters` and `isEnough`
+describe the ordinary Sensor send gate, not acceptance. After blocking SBSD,
+fetch the original page again to inspect the result and open a new session for
+that new document. A successful POST alone is not clearance.
 
 ## Development
 
@@ -105,4 +191,4 @@ Sensor generation receives only script-visible `_abck`/`bm_sz` cookies. SBSD rec
 
 Standalone CI runs `npm ci` and `npm run check` on Node.js 22.22. The locked
 development dependencies also cover the runnable target example. Canonical
-SDK-first documentation: [docs.nullgate.club](https://docs.nullgate.club).
+SDK quickstart: [docs.nullgate.club/en/quickstart](https://docs.nullgate.club/en/quickstart).

@@ -1,3 +1,17 @@
+import type { Protection } from "./akamai.js";
+
+export class AmbiguousProtectionError extends Error {
+  readonly candidates: readonly Protection[];
+
+  constructor(candidates: readonly Protection[]) {
+    super(
+      `Found ${candidates.length} protection candidates; narrow discovery with where or set panic: false to inspect them all`,
+    );
+    this.name = "AmbiguousProtectionError";
+    this.candidates = candidates;
+  }
+}
+
 export class NullgateAPIError extends Error {
   readonly statusCode: number;
   readonly requestId: string | null;

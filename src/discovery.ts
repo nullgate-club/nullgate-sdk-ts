@@ -1,12 +1,14 @@
 import { Parser } from "htmlparser2";
 import { Pixel, type Protection, Sbsd, Sensor } from "./akamai.js";
+import { AmbiguousProtectionError } from "./errors.js";
 import { Page, type ScriptReference } from "./models.js";
 
 export interface FindOptions {
   readonly where?: (protection: Protection) => boolean;
+  readonly panic?: boolean;
 }
 
-/** Retain ambiguous candidates and occurrences; never fetch or execute a script. */
+/** Discover locally; reject multiple candidates unless the caller opts out. */
 export function findProtections(
   page: Page,
   options: FindOptions = {},
@@ -148,5 +150,10 @@ export function findProtections(
       found.push(new Sensor(page, scriptURL, { provenance: reference }));
     }
   }
-  return options.where === undefined ? found : found.filter(options.where);
+  const candidates =
+    options.where === undefined ? found : found.filter(options.where);
+  if (candidates.length > 1 && options.panic !== false) {
+    throw new AmbiguousProtectionError(candidates);
+  }
+  return candidates;
 }

@@ -26,6 +26,7 @@ export {
 } from "./client.js";
 export { type FindOptions, findProtections } from "./discovery.js";
 export {
+  AmbiguousProtectionError,
   NullgateAPIError,
   NullgateClosedError,
   NullgateProtocolError,

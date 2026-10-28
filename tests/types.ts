@@ -1,5 +1,8 @@
 import {
+  AmbiguousProtectionError,
   type ClientOptions,
+  type FindOptions,
+  findProtections,
   NullgateClient,
   type Page,
   Pixel,
@@ -60,6 +63,14 @@ export async function typedConsumer(
 }
 
 export function rejectedPairings(page: Page): void {
+  const discovery: FindOptions = { panic: false };
+  const candidates: Protection[] = findProtections(page, discovery);
+  const retained: readonly Protection[] = new AmbiguousProtectionError(
+    candidates,
+  ).candidates;
+  void retained;
+  // @ts-expect-error The ambiguity option must be a boolean.
+  findProtections(page, { panic: "false" });
   const pixel = new Pixel(page, "https://target.example/akam/13/abc", "12");
   const sensor = new Sensor(page, "https://target.example/sensor");
   const sbsd = new Sbsd(

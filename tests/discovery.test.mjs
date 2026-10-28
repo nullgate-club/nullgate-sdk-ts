@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findProtections, Page, Pixel, Sbsd, Sensor } from "@nullgate/sdk";
+import {
+  AmbiguousProtectionError,
+  findProtections,
+  Page,
+  Pixel,
+  Sbsd,
+  Sensor,
+} from "@nullgate/sdk";
 
 const version = "11111111-2222-4333-8444-555555555555";
 
@@ -16,7 +23,7 @@ test("discovery preserves source queries, duplicate occurrences, and challenge a
       '<script src="opaque/sensor?first=%2f&amp;second=+value"></script>',
     ].join("\n"),
   );
-  const found = findProtections(page);
+  const found = findProtections(page, { panic: false });
   assert.deepEqual(
     found.map((item) => item.kind),
     ["pixel", "pixel", "sbsd", "sensor", "sensor"],
@@ -46,6 +53,68 @@ test("discovery preserves source queries, duplicate occurrences, and challenge a
     "https://target.example/resources/opaque/sensor?first=%2f&second=+value",
   );
   assert.notDeepEqual(sensor.provenance, duplicate.provenance);
+});
+
+test("discovery rejects multiple candidates by default, even across kinds", () => {
+  const page = new Page(
+    "https://target.example/",
+    `<script src="/sensor"></script><script src="/sbsd?v=${version}"></script>`,
+  );
+  const candidates = findProtections(page, { panic: false });
+  assert.throws(
+    () => findProtections(page),
+    (error) => {
+      assert.ok(error instanceof AmbiguousProtectionError);
+      assert.deepEqual(error.candidates, candidates);
+      return true;
+    },
+  );
+  assert.throws(
+    () => findProtections(page, { panic: true }),
+    AmbiguousProtectionError,
+  );
+});
+
+test("where filters before ambiguity and opt-out returns only matching candidates", () => {
+  const page = new Page(
+    "https://target.example/",
+    [
+      '<script src="/first"></script>',
+      `<script src="/sbsd?v=${version}"></script>`,
+      '<script src="/second"></script>',
+    ].join(""),
+  );
+  const onlySbsd = findProtections(page, {
+    where: (item) => item.kind === "sbsd",
+  });
+  assert.ok(onlySbsd[0] instanceof Sbsd);
+  assert.deepEqual(
+    onlySbsd.map((item) => item.scriptURL),
+    [`https://target.example/sbsd?v=${version}`],
+  );
+  assert.deepEqual(findProtections(page, { where: () => false }), []);
+  assert.throws(
+    () =>
+      findProtections(page, {
+        where: (item) => item.kind === "sensor",
+      }),
+    (error) => {
+      assert.ok(error instanceof AmbiguousProtectionError);
+      assert.deepEqual(
+        error.candidates.map((item) => item.scriptURL),
+        ["https://target.example/first", "https://target.example/second"],
+      );
+      return true;
+    },
+  );
+  const sensors = findProtections(page, {
+    where: (item) => item.kind === "sensor",
+    panic: false,
+  });
+  assert.deepEqual(
+    sensors.map((item) => item.provenance?.tagIndex),
+    [0, 2],
+  );
 });
 
 test("only active same-origin classic scripts qualify, with first duplicate attribute winning", () => {
@@ -144,7 +213,7 @@ test("SBSD blocking is raw t presence, and predicates filter concrete candidates
     }).map((item) => item.scriptURL),
     [`https://target.example/two?v=${version}&t=`],
   );
-  const normal = findProtections(page)[0];
+  const normal = findProtections(page, { panic: false })[0];
   assert.ok(normal instanceof Sbsd && !normal.blocking);
 });
 
