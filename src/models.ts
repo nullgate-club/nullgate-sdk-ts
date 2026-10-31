@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Protection as AkamaiProtection } from "./akamai.js";
-import type { ThreatMetrix } from "./threatmetrix.js";
+import type { ThreatMetrix, ThreatMetrixCollector } from "./threatmetrix.js";
 
-export type Protection = AkamaiProtection | ThreatMetrix;
+export type Protection =
+  | AkamaiProtection
+  | ThreatMetrix
+  | ThreatMetrixCollector;
 
 export function httpURL(value: string, name: string): URL {
   let url: URL;

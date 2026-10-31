@@ -14,6 +14,7 @@ import {
   Page,
   Target,
   ThreatMetrix,
+  ThreatMetrixCollector,
   ThreatMetrixParams,
 } from "@nullgate/sdk";
 import { WebSocketServer } from "ws";
@@ -28,6 +29,8 @@ const params = new ThreatMetrixParams(
     "https://tags.example/tags.js?org_id=org&session_id=document",
   ),
 );
+const collectorURL =
+  "https://collector.example/fp/opaque?org_id=not-the-org&session_id=not-the-session&x=%2f+%2B&x=two&empty=";
 
 /**
  * @param {import('node:test').TestContext} t
@@ -80,7 +83,11 @@ function hello(socket) {
   );
 }
 
-test("profiling preserves binary HTTP failures and receives collection while awaiting departure", async (t) => {
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {ThreatMetrix | ThreatMetrixCollector} protection
+ */
+async function profileLifecycle(t, protection) {
   const bytes = Buffer.from([0, 255, 128, 13, 10]);
   let completedAt = 0;
   let departures = 0;
@@ -108,6 +115,17 @@ test("profiling preserves binary HTTP failures and receives collection while awa
           started_at_ms: page.startedAtMs,
         });
         assert.equal(message.timezone, "Europe/Berlin");
+        if (protection instanceof ThreatMetrixCollector) {
+          assert.equal(Object.hasOwn(message, "tags_url"), false);
+          assert.deepEqual(message.collector, {
+            url: collectorURL,
+            org_id: "explicit-org",
+            session_id: "explicit-session",
+          });
+        } else {
+          assert.equal(Object.hasOwn(message, "collector"), false);
+          assert.equal(message.tags_url, protection.scriptURL);
+        }
         assert.equal(JSON.stringify(message).includes("ng_private-key"), false);
         if (continuations === 1) {
           const inputs =
@@ -135,7 +153,10 @@ test("profiling preserves binary HTTP failures and receives collection while awa
             type: "http",
             id: 1,
             request: {
-              role: "tags",
+              role:
+                protection instanceof ThreatMetrixCollector
+                  ? "collector"
+                  : "tags",
               url: `${baseURL}/binary`,
               method: "POST",
               headers: { "User-Agent": "profile UA" },
@@ -192,6 +213,10 @@ test("profiling preserves binary HTTP failures and receives collection while awa
   const target = new Target(
     async (request) => {
       assert.equal(request.credentials, "omit");
+      assert.equal(
+        request.role,
+        protection instanceof ThreatMetrixCollector ? "collector" : "tags",
+      );
       const response = await fetch(request.url, {
         method: request.method,
         headers: request.headers,
@@ -211,7 +236,7 @@ test("profiling preserves binary HTTP failures and receives collection while awa
   const field = { name: "credential", type: "password", value: "s🔑&" };
   const click = { type: "click", x: 2, y: 3 };
   const pending = session.profile(
-    new ThreatMetrixParams(params.protection, {
+    new ThreatMetrixParams(protection, {
       inputs: [field],
       actions: [click],
     }),
@@ -228,12 +253,75 @@ test("profiling preserves binary HTTP failures and receives collection while awa
   assert.equal(profile.isClosed, false);
   await profile.close();
   const next = await session.profile(
-    new ThreatMetrixParams(params.protection, { inputs: [], actions: [] }),
+    new ThreatMetrixParams(protection, { inputs: [], actions: [] }),
     target,
   );
   await next.close();
   assert.equal(continuations, 2);
   assert.equal(departures, 1);
+}
+
+test("tags profiles preserve HTTP failures, observations, state, and departure", (t) =>
+  profileLifecycle(t, params.protection));
+test("direct collector profiles preserve their explicit session and parent document", (t) =>
+  profileLifecycle(
+    t,
+    new ThreatMetrixCollector(
+      page,
+      collectorURL,
+      "explicit-org",
+      "explicit-session",
+    ),
+  ));
+
+test("direct collectors reject malformed URLs, IDs, and ambiguous protection objects", () => {
+  for (const url of [
+    "",
+    "/relative",
+    "ftp://collector.example/fp",
+    "https:///missing-authority",
+    "https://collector.example:65536/fp",
+    "https://user:password@collector.example/fp",
+    "https://@collector.example/fp",
+    "https://collector.example/fp#fragment",
+    "https://collector.example/fp#",
+    "https://collector.example/fp\n",
+    "https://collector.example/a b",
+    "https://collector.example\\fp",
+    null,
+    42,
+  ]) {
+    assert.throws(
+      // @ts-expect-error Runtime validation also rejects non-string URLs.
+      () => new ThreatMetrixCollector(page, url, "org", "session"),
+      TypeError,
+    );
+  }
+  for (const id of ["", " \t", "line\rbreak", "line\nbreak", null, 42]) {
+    assert.throws(
+      // @ts-expect-error Runtime validation also rejects non-string organization IDs.
+      () => new ThreatMetrixCollector(page, collectorURL, id, "session"),
+      TypeError,
+    );
+    assert.throws(
+      // @ts-expect-error Runtime validation also rejects non-string session IDs.
+      () => new ThreatMetrixCollector(page, collectorURL, "org", id),
+      TypeError,
+    );
+  }
+  assert.throws(
+    () =>
+      new ThreatMetrixParams({
+        // @ts-expect-error An unvalidated, ambiguous wire object is not a protection.
+        tags_url: params.protection.scriptURL,
+        collector: {
+          url: collectorURL,
+          org_id: "org",
+          session_id: "session",
+        },
+      }),
+    TypeError,
+  );
 });
 
 test("a duplicate cross-kind ID fails the active profile and cancels its pending target HTTP", async (t) => {

@@ -45,6 +45,7 @@ export {
   type TargetRequest,
   type TargetResponse,
   ThreatMetrix,
+  ThreatMetrixCollector,
   type ThreatMetrixOptions,
   ThreatMetrixParams,
 } from "./threatmetrix.js";

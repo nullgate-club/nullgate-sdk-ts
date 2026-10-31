@@ -4,6 +4,7 @@ import {
   Page,
   Target,
   ThreatMetrix,
+  ThreatMetrixCollector,
   ThreatMetrixParams,
 } from "@nullgate/sdk";
 import { createSession, createTransport, fetch as targetFetch } from "wreq-js";
@@ -13,6 +14,17 @@ const apiKey = process.env.NULLGATE_API_KEY;
 if (!targetURL || !apiKey)
   throw new Error("Set TARGET_URL and NULLGATE_API_KEY");
 const proxy = process.env.TARGET_PROXY ?? null;
+const collectorURL = process.env.TMX_COLLECTOR_URL;
+const orgId = process.env.TMX_ORG_ID;
+const sessionId = process.env.TMX_SESSION_ID;
+if (
+  [collectorURL, orgId, sessionId].some((value) => value !== undefined) &&
+  (!collectorURL || !orgId || !sessionId)
+) {
+  throw new Error(
+    "Direct collector mode requires TMX_COLLECTOR_URL, TMX_ORG_ID, and TMX_SESSION_ID",
+  );
+}
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 // Construct Target first so invalid proxy configuration cannot start paid work.
@@ -66,10 +78,16 @@ try {
     timeout: 30_000,
   });
   const page = new Page(response.url || targetURL, await response.text());
-  const [protection] = api.findProtections(page, {
-    where: (candidate) => candidate instanceof ThreatMetrix,
-  });
-  if (!(protection instanceof ThreatMetrix))
+  const protection =
+    collectorURL !== undefined && orgId !== undefined && sessionId !== undefined
+      ? new ThreatMetrixCollector(page, collectorURL, orgId, sessionId)
+      : api.findProtections(page, {
+          where: (candidate) => candidate instanceof ThreatMetrix,
+        })[0];
+  if (
+    !(protection instanceof ThreatMetrix) &&
+    !(protection instanceof ThreatMetrixCollector)
+  )
     throw new Error(
       `No ThreatMetrix tags found (page HTTP ${response.status})`,
     );

@@ -4,7 +4,7 @@ import {
   prepareActions,
   prepareInputs,
 } from "./akamai.js";
-import { Page, type ScriptReference } from "./models.js";
+import { httpURL, Page, type ScriptReference } from "./models.js";
 import {
   gatherRelay,
   parseTargetProxy,
@@ -65,20 +65,72 @@ export class ThreatMetrix {
   }
 }
 
+/** An explicit collector URL and IDs supplied by the caller, without tag discovery. */
+export class ThreatMetrixCollector {
+  readonly provider = "threatmetrix";
+  readonly kind = "profile";
+  readonly scriptURL: string;
+  readonly orgId: string;
+  readonly sessionId: string;
+  readonly provenance = undefined;
+  readonly #page: Page;
+
+  constructor(page: Page, url: string, orgId: string, sessionId: string) {
+    if (!(page instanceof Page))
+      throw new TypeError("ThreatMetrixCollector requires a Page");
+    if (
+      typeof url !== "string" ||
+      !/^https?:\/\/[^/?#]+/i.test(url) ||
+      /^https?:\/\/[^/?#]*@/i.test(url) ||
+      /[#\s\\]/.test(url)
+    ) {
+      throw new TypeError(
+        "ThreatMetrixCollector requires an absolute HTTP(S) URL without userinfo, fragments, whitespace, or backslashes",
+      );
+    }
+    httpURL(url, "ThreatMetrixCollector.url");
+    for (const [name, value] of [
+      ["orgId", orgId],
+      ["sessionId", sessionId],
+    ]) {
+      if (typeof value !== "string" || !value.trim() || /[\r\n]/.test(value)) {
+        throw new TypeError(
+          `ThreatMetrixCollector.${name} must be a nonempty string without CR/LF`,
+        );
+      }
+    }
+    this.#page = page;
+    this.scriptURL = url;
+    this.orgId = orgId;
+    this.sessionId = sessionId;
+    Object.freeze(this);
+  }
+
+  get page(): Page {
+    return this.#page;
+  }
+}
+
 export interface ThreatMetrixOptions {
   readonly inputs?: readonly InputField[] | null;
   readonly actions?: readonly Action[] | null;
 }
 
 export class ThreatMetrixParams {
-  readonly #protection: ThreatMetrix;
+  readonly #protection: ThreatMetrix | ThreatMetrixCollector;
   readonly inputs: readonly InputField[] | null;
   readonly actions: readonly Action[] | null;
 
-  constructor(protection: ThreatMetrix, options: ThreatMetrixOptions = {}) {
-    if (!(protection instanceof ThreatMetrix))
+  constructor(
+    protection: ThreatMetrix | ThreatMetrixCollector,
+    options: ThreatMetrixOptions = {},
+  ) {
+    if (
+      !(protection instanceof ThreatMetrix) &&
+      !(protection instanceof ThreatMetrixCollector)
+    )
       throw new TypeError(
-        "ThreatMetrixParams requires a ThreatMetrix protection",
+        "ThreatMetrixParams requires a ThreatMetrix or ThreatMetrixCollector protection",
       );
     this.#protection = protection;
     this.inputs = options.inputs ?? null;
@@ -86,7 +138,7 @@ export class ThreatMetrixParams {
     Object.freeze(this);
   }
 
-  get protection(): ThreatMetrix {
+  get protection(): ThreatMetrix | ThreatMetrixCollector {
     return this.#protection;
   }
 
@@ -103,9 +155,17 @@ export class ThreatMetrixParams {
         document_id: page.documentId,
         started_at_ms: page.startedAtMs,
       },
-      tags_url: protection.scriptURL,
       timezone: timezone ?? null,
     };
+    if (protection instanceof ThreatMetrixCollector) {
+      start.collector = {
+        url: protection.scriptURL,
+        org_id: protection.orgId,
+        session_id: protection.sessionId,
+      };
+    } else {
+      start.tags_url = protection.scriptURL;
+    }
     if (this.inputs !== null) start.inputs = prepareInputs(this.inputs);
     if (this.actions !== null) start.actions = prepareActions(this.actions);
     return JSON.stringify(start);

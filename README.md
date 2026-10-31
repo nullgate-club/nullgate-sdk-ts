@@ -135,7 +135,7 @@ Parameters are paired with their matching concrete protection:
 - `new PixelParams(pixel, script)`
 - `new SensorParams(sensor, script, { cookies?, inputs?, actions? })`
 - `new SbsdParams(sbsd, script, { cookies? })`
-- `new ThreatMetrixParams(threatMetrix, { inputs?, actions? })` for `session.profile`, not `session.solve`
+- `new ThreatMetrixParams(threatMetrixOrCollector, { inputs?, actions? })` for `session.profile`, not `session.solve`
 
 `script` is source text fetched by the caller from the candidate's `scriptURL`. Cookies are explicit string mappings. For Sensor, missing/null inputs or actions preserve server defaults; empty arrays explicitly override them. `inputs` contains caller-filled field attributes and optional raw `value` strings. Values are summarized and SHA-256 hashed locally as UTF-16LE before transmission. `prepareInputs` exposes the same operation for callers who need the prepared representation. Actions use the service's explicit JSON event format; input/change action values must already be summaries, not raw secrets.
 
@@ -148,10 +148,46 @@ to its native HTTP transport and SDK-owned TURN/TCP stream.
 `NULLGATE_PROFILE_BASE_URL` overrides the profiling service independently of
 Akamai's `NULLGATE_BASE_URL`.
 
+Set `TMX_COLLECTOR_URL`, `TMX_ORG_ID`, and `TMX_SESSION_ID` together to run that
+example with explicit collector facts instead of tags discovery. The caller must
+obtain those facts from its site integration; the example does not parse or run
+the site's bootstrap.
+
 Construct `new ThreatMetrix(page, tagsURL)` when the actual tags URL is already
-known, or use discovery. The SDK sends the existing `Page` document ID and
-started-at clock, actual tags URL, and session timezone. It never executes a
-collector locally or creates source hashes, versions, or a source profile.
+known, or use discovery. For a direct collector, supply the actual caller-generated
+URL and explicit organization/session IDs:
+
+```ts
+import { ThreatMetrixCollector, ThreatMetrixParams } from "@nullgate/sdk";
+
+const protection = new ThreatMetrixCollector(
+  page,
+  collectorURL,
+  orgId,
+  sessionId,
+);
+const profile = await session.profile(
+  new ThreatMetrixParams(protection),
+  target,
+);
+```
+
+`ThreatMetrixCollector` is explicit-only, not a discovery heuristic. Its URL must
+be absolute HTTP(S), with a host and valid port, without userinfo, fragments, raw
+whitespace, or backslashes. The SDK preserves its path and opaque query unchanged.
+Both IDs must be non-whitespace strings without CR/LF. They are not recovered
+from query parameters or source-map comments, generated, or replaced by the
+session's state ID. Use that same `sessionId` in the site's expected hidden form
+input when submitting; the SDK does not create or fill that input.
+
+The SDK sends the existing `Page` URL, HTML, document ID, started-at clock, and
+session timezone with either `tags_url` or `collector: { url, org_id, session_id }`,
+never both. A direct source fetch uses role `collector`, without fake tags or
+bootstrap scripts. The supplied `Page` remains the document context for either
+entry. The SDK never executes a collector locally or creates source hashes,
+versions, or a source profile. Profiling completion is not a target-acceptance
+guarantee.
+
 Optional observations reuse Sensor's `InputField` and `Action` types and local
 preparation. Raw field values are summarized and SHA-256 hashed locally as
 UTF-16LE before the profile is queued; action input/change values must already

@@ -15,6 +15,7 @@ import {
   type Solution,
   type Target,
   ThreatMetrix,
+  ThreatMetrixCollector,
   ThreatMetrixParams,
 } from "@nullgate/sdk";
 
@@ -117,4 +118,13 @@ export function rejectedPairings(page: Page): void {
   new ThreatMetrixParams(sensor);
   // @ts-expect-error Akamai parameters cannot contain a ThreatMetrix protection.
   new SensorParams(tmx, "source");
+  const collector = new ThreatMetrixCollector(
+    page,
+    "https://collector.example/fp?opaque=value",
+    "org",
+    "session",
+  );
+  new ThreatMetrixParams(collector);
+  // @ts-expect-error Akamai parameters cannot contain a direct collector.
+  new SensorParams(collector, "source");
 }
