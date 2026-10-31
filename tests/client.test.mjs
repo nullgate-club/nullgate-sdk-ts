@@ -20,6 +20,8 @@ import {
 } from "@nullgate/sdk";
 
 const identity = "11111111-2222-4333-8444-555555555555";
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const page = new Page(
   "https://target.example/login",
   "<html>private document</html>",
@@ -31,7 +33,7 @@ const apiKey = "ng_private_test_credential";
 
 /**
  * @typedef {{
- *   website: {url: string, html: string},
+ *   website: {url: string, html: string, document_id: string, started_at_ms: number},
  *   timezone?: string,
  *   script: {text: string, source: string},
  *   challenge?: string,
@@ -90,7 +92,6 @@ test("all concrete operations normalize real service shapes into ready target re
     assert.equal(req.headers.authorization, `Bearer ${apiKey}`);
     assert.equal(req.headers["user-agent"], "Windows Chrome146");
     const body = /** @type {GenerationRequest} */ (await json(req));
-    assert.deepEqual(body.website, { url: page.url, html: page.html });
     assert.equal(body.timezone, "Europe/Berlin");
     assert.equal(typeof body.script.text, "string");
     if (req.url?.endsWith("type=pixel")) {
@@ -171,40 +172,77 @@ test("all concrete operations normalize real service shapes into ready target re
   assert.equal(result.headers["content-type"], "text/plain;charset=UTF-8");
 });
 
-test("null input/action options keep server defaults while empty arrays explicitly override them", async (t) => {
-  /** @type {unknown[]} */
-  const payloads = [];
+test("queued discoveries change document context without replacing session state", async (t) => {
+  const before = Date.now();
+  const acquired = new Page(
+    "https://target.example/login",
+    [
+      '<script>bazadebezolkohpepadr="12"</script>',
+      '<script src="/akam/13/abc"></script>',
+      '<script src="/sensor"></script>',
+      `<script src="/sbsd?v=${identity}"></script>`,
+    ].join(""),
+  );
+  const reacquired = new Page(acquired.url, acquired.html);
+  const after = Date.now();
+  /** @type {Array<{body: GenerationRequest, state: string}>} */
+  const seen = [];
   const baseURL = await serve(t, async (req, res) => {
-    payloads.push(await json(req));
-    reply(res, { sensor_data: "", headers: {}, send_at: 0 });
+    assert.equal(req.url?.startsWith(`/v1/${identity}/generate?`), true);
+    assert.equal(req.headers["user-agent"], "document-session");
+    const body = /** @type {GenerationRequest} */ (await json(req));
+    assert.equal(body.timezone, "Europe/Berlin");
+    const state = req.headers["x-state-id"];
+    assert.ok(typeof state === "string");
+    assert.match(state, uuidPattern);
+    seen.push({ body, state });
+    reply(
+      res,
+      req.url?.endsWith("type=akamai")
+        ? { sensor_data: "encoded", headers: {}, send_at: 0 }
+        : {
+            url: "https://target.example/submit",
+            body: "encoded",
+            headers: {},
+            send_at: 0,
+          },
+    );
   });
   const client = new NullgateClient({ apiKey, baseURL });
   t.after(() => client.close());
-  const session = client.open({ identity, userAgent: "test" });
-  await session.solve(
-    new SensorParams(sensor, "source", {
-      cookies: null,
-      inputs: null,
-      actions: null,
-    }),
-  );
-  await session.solve(
-    new SensorParams(sensor, "source", { inputs: [], actions: [] }),
-  );
-  assert.deepEqual(payloads, [
-    {
-      cookies: {},
-      website: { url: page.url, html: page.html },
-      script: { source: sensor.scriptURL, text: "source" },
-    },
-    {
-      cookies: {},
-      inputs: [],
-      actions: [],
-      website: { url: page.url, html: page.html },
-      script: { source: sensor.scriptURL, text: "source" },
-    },
-  ]);
+  const session = client.open({
+    identity,
+    userAgent: "document-session",
+    timezone: "Europe/Berlin",
+  });
+  const pending = [];
+  for (const document of [acquired, reacquired]) {
+    for (const protection of client.findProtections(document, {
+      panic: false,
+    })) {
+      if (protection.provider !== "akamai") continue;
+      const params =
+        protection.kind === "pixel"
+          ? new PixelParams(protection, "source")
+          : protection.kind === "sensor"
+            ? new SensorParams(protection, "source")
+            : new SbsdParams(protection, "source");
+      pending.push(session.solve(params));
+    }
+  }
+  await Promise.all(pending);
+  assert.equal(seen.length, 6);
+  for (const [index, request] of seen.entries()) {
+    const document = index < 3 ? acquired : reacquired;
+    assert.equal(request.body.website.document_id, document.documentId);
+    assert.equal(request.body.website.started_at_ms, document.startedAtMs);
+    assert.ok(Number.isInteger(document.startedAtMs));
+    assert.ok(document.startedAtMs >= before && document.startedAtMs <= after);
+    assert.match(document.documentId, uuidPattern);
+    assert.equal(request.state, seen[index < 3 ? 0 : 3]?.state);
+  }
+  assert.notEqual(acquired.documentId, reacquired.documentId);
+  assert.equal(seen[0]?.state, seen[3]?.state);
 });
 
 test("parallel sessions stay isolated, and error rotations survive absent later state headers", {
@@ -261,10 +299,11 @@ test("parallel sessions stay isolated, and error rotations survive absent later 
   });
   await arrived.promise;
   await b.solve(params);
-  assert.deepEqual(seen, [
-    { ua: "A", state: undefined },
-    { ua: "B", state: undefined },
-  ]);
+  assert.equal(seen[0]?.ua, "A");
+  assert.equal(seen[1]?.ua, "B");
+  assert.match(String(seen[0]?.state), uuidPattern);
+  assert.match(String(seen[1]?.state), uuidPattern);
+  assert.notEqual(seen[0]?.state, seen[1]?.state);
   release.resolve(undefined);
   await Promise.all([a1, a2]);
   await a.solve(params);
@@ -311,7 +350,8 @@ test("a truncated response body closes and preserves its state header for the ne
     (await session.solve(params)).body,
     '{"sensor_data":"continued"}',
   );
-  assert.deepEqual(states, [undefined, "truncated-state"]);
+  assert.match(String(states[0]), uuidPattern);
+  assert.equal(states[1], "truncated-state");
 });
 
 for (const mode of ["timeout", "cancel"]) {
@@ -374,7 +414,8 @@ for (const mode of ["timeout", "cancel"]) {
       (await session.solve(params)).body,
       '{"sensor_data":"continued"}',
     );
-    assert.deepEqual(states, [undefined, "body-state"]);
+    assert.match(String(states[0]), uuidPattern);
+    assert.equal(states[1], "body-state");
   });
 }
 
@@ -387,6 +428,7 @@ test("queued cancellation is prompt without opening a concurrent continuation re
   const baseURL = await serve(t, async (req, res) => {
     await json(req);
     requests += 1;
+    if (requests > 1) assert.equal(req.headers["x-state-id"], "continued");
     if (requests === 1) {
       arrived.resolve(undefined);
       await release.promise;
@@ -404,7 +446,11 @@ test("queued cancellation is prompt without opening a concurrent continuation re
   await arrived.promise;
   const controller = new AbortController();
   const reason = new Error("cancel queued generation");
-  const cancelled = session.solve(params, { signal: controller.signal });
+  const otherPage = new Page(page.url, page.html);
+  const cancelled = session.solve(
+    new SensorParams(new Sensor(otherPage, sensor.scriptURL), "source"),
+    { signal: controller.signal },
+  );
   const rejection = assert.rejects(cancelled, (error) => error === reason);
   const third = session.solve(params);
   controller.abort(reason);

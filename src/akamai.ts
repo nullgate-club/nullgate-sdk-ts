@@ -90,6 +90,9 @@ export type InputValue = {
   readonly length: number;
   readonly hash: string;
   readonly counts: readonly [number, number, number, number];
+  readonly hash31?: number;
+  readonly trimmed_hash31?: number;
+  readonly trimmed_length?: number;
 };
 
 /** Service event facts; input/change values are prepared summaries, never raw text. */
@@ -97,6 +100,18 @@ export type Action = Readonly<Record<string, JsonValue>> & {
   readonly type: string;
   readonly value?: InputValue;
 };
+
+/** @internal */
+export function prepareActions(actions: readonly Action[]): Action[] {
+  return actions.map((action) => {
+    if (typeof action.value === "string") {
+      throw new TypeError(
+        "Raw action input values are not allowed; use a prepared InputValue",
+      );
+    }
+    return { ...action };
+  });
+}
 
 export interface PreparedInput {
   readonly attributes: Readonly<Record<string, string>>;
@@ -121,15 +136,27 @@ export function prepareInputs(inputs: readonly InputField[]): PreparedInput[] {
     const special = value.replace(/[A-Za-z0-9_\s]/g, "");
     const lower = value.toLowerCase().match(/[a-z]/g)?.length ?? 0;
     const digits = value.match(/[0-9]/g)?.length ?? 0;
+    const trimmed = value.trim();
     return {
       attributes,
       value: {
         length: value.length,
         hash: createHash("sha256").update(value, "utf16le").digest("hex"),
         counts: [value.length, special.length, lower, digits],
+        hash31: hash31(value),
+        trimmed_hash31: hash31(trimmed),
+        trimmed_length: trimmed.length,
       },
     };
   });
+}
+
+function hash31(value: string): number {
+  let result = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    result = (Math.imul(result, 31) + value.charCodeAt(index)) | 0;
+  }
+  return result;
 }
 
 export class PixelParams {

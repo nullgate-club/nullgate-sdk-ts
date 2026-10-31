@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import type { Protection as AkamaiProtection } from "./akamai.js";
+import type { ThreatMetrix } from "./threatmetrix.js";
+
+export type Protection = AkamaiProtection | ThreatMetrix;
+
 export function httpURL(value: string, name: string): URL {
   let url: URL;
   try {
@@ -15,6 +21,8 @@ export function httpURL(value: string, name: string): URL {
 export class Page {
   readonly url: string;
   readonly html: string;
+  readonly documentId: string;
+  readonly startedAtMs: number;
 
   constructor(url: string, html: string) {
     httpURL(url, "Page.url");
@@ -22,6 +30,8 @@ export class Page {
       throw new TypeError("Page.html must be a string");
     this.url = url;
     this.html = html;
+    this.documentId = randomUUID();
+    this.startedAtMs = Date.now();
     Object.freeze(this);
   }
 }

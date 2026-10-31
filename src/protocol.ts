@@ -1,6 +1,7 @@
 import {
   type Params,
   PixelParams,
+  prepareActions,
   prepareInputs,
   SbsdParams,
   SensorParams,
@@ -29,16 +30,8 @@ export function prepareRequest(
     operation = "akamai";
     values = { cookies: { ...params.cookies } };
     if (params.inputs !== null) values.inputs = prepareInputs(params.inputs);
-    if (params.actions !== null) {
-      values.actions = params.actions.map((action) => {
-        if (typeof action.value === "string") {
-          throw new TypeError(
-            "Raw action input values are not allowed; use a prepared InputValue",
-          );
-        }
-        return { ...action };
-      });
-    }
+    if (params.actions !== null)
+      values.actions = prepareActions(params.actions);
   } else if (params instanceof SbsdParams) {
     operation = "sbsd";
     values = { cookies: { ...params.cookies } };
@@ -48,7 +41,12 @@ export function prepareRequest(
     );
   }
   const protection = params.protection;
-  values.website = { url: protection.page.url, html: protection.page.html };
+  values.website = {
+    url: protection.page.url,
+    html: protection.page.html,
+    document_id: protection.page.documentId,
+    started_at_ms: protection.page.startedAtMs,
+  };
   values.script = { source: protection.scriptURL, text: params.script };
   if (timezone !== undefined) values.timezone = timezone;
   return {

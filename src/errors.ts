@@ -1,4 +1,4 @@
-import type { Protection } from "./akamai.js";
+import type { Protection } from "./models.js";
 
 export class AmbiguousProtectionError extends Error {
   readonly candidates: readonly Protection[];
@@ -44,17 +44,24 @@ export class NullgateProtocolError extends Error {
 }
 
 export class NullgateClosedError extends Error {
-  constructor(owner: "client" | "session") {
+  constructor(owner: "client" | "session" | "profile") {
     super(`Nullgate ${owner} is closed`);
     this.name = "NullgateClosedError";
   }
 }
 
 export class NullgateTransportError extends Error {
-  constructor() {
+  readonly statusCode: number;
+  readonly requestId: string | null;
+
+  constructor(requestId?: string | null, statusCode = 0) {
     super(
-      "Nullgate generation request failed before a complete response was received",
+      requestId === undefined
+        ? "Nullgate generation request failed before a complete response was received"
+        : `Nullgate profile connection failed${requestId ? ` (request_id=${requestId})` : ""}`,
     );
+    this.statusCode = statusCode;
+    this.requestId = requestId ?? null;
     this.name = "NullgateTransportError";
   }
 }

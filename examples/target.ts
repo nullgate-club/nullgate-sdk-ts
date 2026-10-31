@@ -36,6 +36,10 @@ try {
   const [protection] = api.findProtections(page);
   if (!protection) {
     console.log(`No supported candidate found (page HTTP ${response.status})`);
+  } else if (protection.provider === "threatmetrix") {
+    throw new Error(
+      "Use examples/profile.ts for an active ThreatMetrix profile",
+    );
   } else {
     const scriptResponse = await target.fetch(protection.scriptURL, {
       headers: { Referer: page.url },

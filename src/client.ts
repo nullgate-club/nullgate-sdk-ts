@@ -1,18 +1,22 @@
-import type { Params, Protection } from "./akamai.js";
+import { randomUUID } from "node:crypto";
+import type { Params } from "./akamai.js";
 import { type FindOptions, findProtections } from "./discovery.js";
 import { NullgateClosedError, NullgateTransportError } from "./errors.js";
-import { httpURL, type Page } from "./models.js";
+import { httpURL, type Page, type Protection } from "./models.js";
+import { Profile } from "./profile.js";
 import {
   normalizeResponse,
   type PreparedRequest,
   prepareRequest,
 } from "./protocol.js";
 import { type OperationOptions, Solution } from "./solution.js";
+import { Target, ThreatMetrixParams } from "./threatmetrix.js";
 
 export interface ClientOptions {
   readonly apiKey: string;
   readonly baseURL?: string;
   readonly analyticsURL?: string;
+  readonly profileBaseURL?: string;
   readonly timeoutMs?: number;
   readonly reportTimeoutMs?: number;
   /** Native-fetch-compatible seam for a caller-owned transport or local tests. */
@@ -85,10 +89,12 @@ export class NullgateClient {
   readonly #apiKey: string;
   readonly #baseURL: string;
   readonly #analyticsURL: string;
+  readonly #profileBaseURL: string;
   readonly #timeoutMs: number;
   readonly #reportTimeoutMs: number;
   readonly #fetch: typeof globalThis.fetch;
   readonly #lifetime = new AbortController();
+  readonly #profiles = new Set<Profile>();
 
   constructor(options: ClientOptions) {
     if (
@@ -106,6 +112,10 @@ export class NullgateClient {
     this.#analyticsURL = serviceURL(
       options.analyticsURL ?? "https://analytics.nullgate.club",
       "analyticsURL",
+    );
+    this.#profileBaseURL = serviceURL(
+      options.profileBaseURL ?? "https://threatmetrix.nullgate.club",
+      "profileBaseURL",
     );
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#reportTimeoutMs = options.reportTimeoutMs ?? 3_000;
@@ -192,6 +202,44 @@ export class NullgateClient {
     }
   }
 
+  /** @internal */
+  async _profile(
+    identity: string,
+    userAgent: string,
+    stateId: string | undefined,
+    start: string,
+    target: Target,
+    signal: AbortSignal,
+    rotateState: (stateId: string) => void,
+  ): Promise<Profile> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.#apiKey}`,
+      "User-Agent": userAgent,
+    };
+    if (stateId !== undefined) headers["X-State-ID"] = stateId;
+    const url = new URL(`${this.#profileBaseURL}/v1/${identity}/profile`);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const profile = Profile._connect({
+      url: url.href,
+      headers,
+      start,
+      target,
+      signal,
+      timeoutMs: this.#timeoutMs,
+      rotateState,
+      reporter: this.report.bind(this),
+    });
+    this.#profiles.add(profile);
+    void profile._closed.then(() => this.#profiles.delete(profile));
+    try {
+      await profile._waitForReady();
+      return profile;
+    } catch (error) {
+      await profile.close();
+      throw error;
+    }
+  }
+
   /** Best-effort HTTP delivery only; never sends API credentials or session state. */
   async report(
     requestId: string,
@@ -242,18 +290,20 @@ export class NullgateClient {
 
   async [Symbol.asyncDispose](): Promise<void> {
     this.close();
+    await Promise.all(Array.from(this.#profiles, (profile) => profile.close()));
   }
 }
 
-/** One document's sequential continuation stream; independent sessions can run concurrently. */
+/** Sequential document continuations; independent sessions can run concurrently. */
 export class NullgateSession {
   readonly identity: string;
   readonly userAgent: string;
   readonly timezone: string | undefined;
   readonly #client: NullgateClient;
   readonly #lifetime = new AbortController();
-  #stateId: string | undefined;
+  #stateId: string | undefined = randomUUID();
   #pending: Promise<void> = Promise.resolve();
+  readonly #profiles = new Set<Profile>();
 
   /** @internal */
   constructor(client: NullgateClient, options: SessionOptions) {
@@ -322,6 +372,46 @@ export class NullgateSession {
     return abortable(pending, signal);
   }
 
+  async profile(
+    params: ThreatMetrixParams,
+    target: Target,
+    options: OperationOptions = {},
+  ): Promise<Profile> {
+    if (!(params instanceof ThreatMetrixParams))
+      throw new TypeError("profile requires ThreatMetrixParams");
+    if (!(target instanceof Target))
+      throw new TypeError("profile requires a Target");
+    const signal = AbortSignal.any([
+      this.#lifetime.signal,
+      this.#client._signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    signal.throwIfAborted();
+    const start = params._startFrame(this.timezone);
+    const pending = this.#pending.then(async () => {
+      signal.throwIfAborted();
+      const profile = await this.#client._profile(
+        this.identity,
+        this.userAgent,
+        this.#stateId,
+        start,
+        target,
+        signal,
+        (stateId) => {
+          this.#stateId = stateId;
+        },
+      );
+      this.#profiles.add(profile);
+      void profile._closed.then(() => this.#profiles.delete(profile));
+      return profile;
+    });
+    this.#pending = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return abortable(pending, signal);
+  }
+
   close(): void {
     this.#lifetime.abort(new NullgateClosedError("session"));
     this.#stateId = undefined;
@@ -330,5 +420,6 @@ export class NullgateSession {
   async [Symbol.asyncDispose](): Promise<void> {
     this.close();
     await this.#pending;
+    await Promise.all(Array.from(this.#profiles, (profile) => profile.close()));
   }
 }

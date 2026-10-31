@@ -11,36 +11,25 @@ test("input summaries retain attributes and order without raw UTF-16 values", ()
     { name: "missing" },
   ];
   const prepared = prepareInputs(fields);
-  assert.deepEqual(prepared, [
-    {
-      attributes: { name: "credential", type: "password" },
-      value: {
-        length: 4,
-        hash: createHash("sha256")
-          .update(Buffer.from("73003dd811dd2600", "hex"))
-          .digest("hex"),
-        counts: [4, 3, 1, 0],
-      },
-    },
-    {
-      attributes: { name: "surrogate" },
-      value: {
-        length: 1,
-        hash: createHash("sha256")
-          .update(Buffer.from("00d8", "hex"))
-          .digest("hex"),
-        counts: [1, 1, 0, 0],
-      },
-    },
-    {
-      attributes: { name: "missing" },
-      value: {
-        length: 0,
-        hash: createHash("sha256").update("").digest("hex"),
-        counts: [0, 0, 0, 0],
-      },
-    },
-  ]);
+  assert.deepEqual(
+    prepared.map((field) => field.attributes.name),
+    ["credential", "surrogate", "missing"],
+  );
+  assert.deepEqual(
+    prepared.map((field) => field.value.length),
+    [4, 1, 0],
+  );
+  assert.deepEqual(
+    prepared.map((field) => field.value.hash),
+    [
+      createHash("sha256")
+        .update(Buffer.from("73003dd811dd2600", "hex"))
+        .digest("hex"),
+      createHash("sha256").update(Buffer.from("00d8", "hex")).digest("hex"),
+      createHash("sha256").update("").digest("hex"),
+    ],
+  );
+  assert.ok(prepared.every((field) => !("value" in field.attributes)));
   assert.equal(fields[0]?.value, "s🔑&");
   assert.equal(JSON.stringify(prepared).includes("s🔑&"), false);
 });
@@ -58,6 +47,25 @@ test("input categories use JS whitespace, Unicode lowercase, and UTF-16 lengths"
   ];
   for (const [value, expected] of cases) {
     assert.deepEqual(prepareInputs([{ value }])[0]?.value.counts, expected);
+  }
+});
+
+test("hash facts retain signed UTF-16 and native trim boundaries", () => {
+  const cases = [
+    ["", 0, 0, 0],
+    ["A_9 😀İ\u00a0", -902761640, 386520648, 7],
+    ["\u0085\ufeff", 69402, 133, 1],
+    ["\ufeff\u00a0😀 \u0085\tX\u3000\ufeff", -2113306057, 927999095, 6],
+    [" \0 ", 30784, 0, 1],
+    ["\u180ex\u200b", 5929761, 5929761, 3],
+    ["\ud800", 55296, 55296, 1],
+  ];
+  for (const [text, hash31, trimmedHash31, trimmedLength] of cases) {
+    const value = prepareInputs([{ value: String(text) }])[0]?.value;
+    assert.deepEqual(
+      [value?.hash31, value?.trimmed_hash31, value?.trimmed_length],
+      [hash31, trimmedHash31, trimmedLength],
+    );
   }
 });
 

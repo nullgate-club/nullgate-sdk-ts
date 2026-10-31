@@ -9,7 +9,6 @@ export {
   Pixel,
   PixelParams,
   type PreparedInput,
-  type Protection,
   type ProvenanceOptions,
   prepareInputs,
   Sbsd,
@@ -32,5 +31,20 @@ export {
   NullgateProtocolError,
   NullgateTransportError,
 } from "./errors.js";
-export { type JsonValue, Page, type ScriptReference } from "./models.js";
+export {
+  type JsonValue,
+  Page,
+  type Protection,
+  type ScriptReference,
+} from "./models.js";
+export { type PagehideOptions, Profile } from "./profile.js";
 export type { OperationOptions, Solution } from "./solution.js";
+export {
+  Target,
+  type TargetFetch,
+  type TargetRequest,
+  type TargetResponse,
+  ThreatMetrix,
+  type ThreatMetrixOptions,
+  ThreatMetrixParams,
+} from "./threatmetrix.js";

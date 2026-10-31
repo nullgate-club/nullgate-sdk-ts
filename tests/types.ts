@@ -13,6 +13,9 @@ import {
   Sensor,
   SensorParams,
   type Solution,
+  type Target,
+  ThreatMetrix,
+  ThreatMetrixParams,
 } from "@nullgate/sdk";
 
 /** Compiled, not executed: consumer-facing discriminants and variant pairing. */
@@ -20,6 +23,7 @@ export async function typedConsumer(
   options: ClientOptions,
   protection: Protection,
   signal: AbortSignal,
+  target: Target,
 ): Promise<void> {
   const client = new NullgateClient(options);
   const session = client.open({
@@ -29,6 +33,26 @@ export async function typedConsumer(
   try {
     let solution: Solution;
     switch (protection.kind) {
+      case "profile": {
+        const profile = await session.profile(
+          new ThreatMetrixParams(protection),
+          target,
+          { signal },
+        );
+        try {
+          await profile.waitForCollected({ signal });
+          await profile.pagehide({
+            atMs: Date.now(),
+            persisted: false,
+            signal,
+          });
+          const delivered: boolean = await profile.report({ signal });
+          void delivered;
+        } finally {
+          await profile.close();
+        }
+        return;
+      }
       case "pixel":
         solution = await session.solve(new PixelParams(protection, "source"), {
           signal,
@@ -85,4 +109,12 @@ export function rejectedPairings(page: Page): void {
   new SbsdParams(sensor, "source");
   // @ts-expect-error Pixel parameters cannot contain an SBSD.
   new PixelParams(sbsd, "source");
+  const tmx = new ThreatMetrix(
+    page,
+    "https://tags.example/tags.js?org_id=org&session_id=session",
+  );
+  // @ts-expect-error Profile parameters cannot contain an Akamai protection.
+  new ThreatMetrixParams(sensor);
+  // @ts-expect-error Akamai parameters cannot contain a ThreatMetrix protection.
+  new SensorParams(tmx, "source");
 }

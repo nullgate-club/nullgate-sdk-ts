@@ -7,6 +7,7 @@ import {
   Pixel,
   Sbsd,
   Sensor,
+  ThreatMetrix,
 } from "@nullgate/sdk";
 
 const version = "11111111-2222-4333-8444-555555555555";
@@ -115,6 +116,33 @@ test("where filters before ambiguity and opt-out returns only matching candidate
     sensors.map((item) => item.provenance?.tagIndex),
     [0, 2],
   );
+});
+
+test("ThreatMetrix tags cross origins without weakening mixed-provider ambiguity", () => {
+  const page = new Page(
+    "https://target.example/login",
+    [
+      '<base href="https://collector.example/resources/">',
+      '<script src="tags.js?org_id=org&amp;session_id=document"></script>',
+      '<script src="/tags.js?org_id=first&amp;org_id=second&amp;session_id=document"></script>',
+      '<script src="/tags.js?org_id=org&amp;session_id="></script>',
+      '<script src="https://target.example/sensor"></script>',
+    ].join(""),
+  );
+  assert.throws(() => findProtections(page), AmbiguousProtectionError);
+  const found = findProtections(page, { panic: false });
+  assert.equal(found.length, 2);
+  assert.ok(found[0] instanceof ThreatMetrix);
+  assert.equal(found[0].page, page);
+  assert.equal(
+    found[0].scriptURL,
+    "https://collector.example/resources/tags.js?org_id=org&session_id=document",
+  );
+  assert.ok(found[1] instanceof Sensor);
+  const selected = findProtections(page, {
+    where: (candidate) => candidate.provider === "threatmetrix",
+  });
+  assert.deepEqual(selected, [found[0]]);
 });
 
 test("only active same-origin classic scripts qualify, with first duplicate attribute winning", () => {

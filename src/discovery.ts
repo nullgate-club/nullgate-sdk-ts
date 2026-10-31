@@ -1,7 +1,8 @@
 import { Parser } from "htmlparser2";
-import { Pixel, type Protection, Sbsd, Sensor } from "./akamai.js";
+import { Pixel, Sbsd, Sensor } from "./akamai.js";
 import { AmbiguousProtectionError } from "./errors.js";
-import { Page, type ScriptReference } from "./models.js";
+import { Page, type Protection, type ScriptReference } from "./models.js";
+import { isThreatMetrixTagsURL, ThreatMetrix } from "./threatmetrix.js";
 
 export interface FindOptions {
   readonly where?: (protection: Protection) => boolean;
@@ -106,12 +107,17 @@ export function findProtections(
     } catch {
       continue;
     }
-    if (source.origin !== document.origin) continue;
+    if (source.protocol !== "http:" && source.protocol !== "https:") continue;
     source.hash = "";
     const scriptURL = source.href;
     const path = source.pathname.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) =>
       Buffer.from(encoded.replaceAll("%", ""), "hex").toString("utf8"),
     );
+    if (isThreatMetrixTagsURL(source)) {
+      found.push(new ThreatMetrix(page, scriptURL, { provenance: reference }));
+      continue;
+    }
+    if (source.origin !== document.origin) continue;
     if (/^\/akam\/13\/[0-9a-fA-F]+$/.test(path)) {
       for (const [challenge, challengeOffset] of challenges) {
         found.push(
