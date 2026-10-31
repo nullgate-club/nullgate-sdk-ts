@@ -51,13 +51,8 @@ function headers(value: unknown): value is Record<string, string> {
   );
 }
 
-function uuid(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      value,
-    )
-  );
+function isRequestId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
 }
 
 function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -290,7 +285,7 @@ export class Profile {
         message.status < 400 ||
         message.status > 599 ||
         typeof message.detail !== "string" ||
-        (message.request_id !== null && !uuid(message.request_id))
+        (message.request_id !== null && !isRequestId(message.request_id))
       ) {
         throw this.#protocol("malformed service error");
       }
@@ -308,7 +303,7 @@ export class Profile {
     if (message.type === "hello") {
       if (
         this.#requestId !== undefined ||
-        !uuid(message.request_id) ||
+        !isRequestId(message.request_id) ||
         typeof message.state_id !== "string" ||
         !message.state_id ||
         /[\r\n]/.test(message.state_id)

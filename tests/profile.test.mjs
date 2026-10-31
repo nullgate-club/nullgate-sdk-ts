@@ -19,7 +19,7 @@ import {
 import { WebSocketServer } from "ws";
 
 const identity = "11111111-2222-4333-8444-555555555555";
-const requestId = "11111111-2222-4333-8444-555555555556";
+const requestId = "11111111222243338444555555555556";
 const nextState = "11111111-2222-4333-8444-555555555557";
 const page = new Page("https://target.example/login", "<html>document</html>");
 const params = new ThreatMetrixParams(

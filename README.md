@@ -194,7 +194,7 @@ actual UDP relay, not a TCP relay, host candidate, or local UDP probe.
 Allocation failure reports a null observation, never fabricated addresses or
 timing and never a direct fallback after proxy failure.
 
-- `profile.requestId` identifies the actual profiling request.
+- `profile.requestId` is the 32-character hexadecimal report identifier, distinct from document and state UUIDs.
 - `profile.isCollected` / `await profile.waitForCollected({ signal? })` describe
   completion of all installed collectors, independently of readiness.
 - `await profile.pagehide({ atMs?, persisted?, signal? })` sends an explicit
