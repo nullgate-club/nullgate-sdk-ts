@@ -139,6 +139,8 @@ Parameters are paired with their matching concrete protection:
 
 `script` is source text fetched by the caller from the candidate's `scriptURL`. Cookies are explicit string mappings. For Sensor, missing/null inputs or actions preserve server defaults; empty arrays explicitly override them. `inputs` contains caller-filled field attributes and optional raw `value` strings. Values are summarized and SHA-256 hashed locally as UTF-16LE before transmission. `prepareInputs` exposes the same operation for callers who need the prepared representation. Actions use the service's explicit JSON event format; input/change action values must already be summaries, not raw secrets.
 
+Each input is a flat string map, for example `{ selector: "#login input[name=email]", name: "email", value: email }`. The optional reserved `selector` is sent at the top level of the prepared input, not in `attributes`, and is omitted when absent. It must match exactly one native `input` or `textarea`; any nonempty `id` or `name` must also match that element. A selector can be used without `id` or `name`; omitting it preserves the existing id/name binding.
+
 ## Active ThreatMetrix profiles
 
 Run `node examples/profile.ts` with `TARGET_URL` and `NULLGATE_API_KEY` for the

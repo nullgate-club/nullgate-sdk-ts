@@ -116,6 +116,7 @@ export function prepareActions(actions: readonly Action[]): Action[] {
 export interface PreparedInput {
   readonly attributes: Readonly<Record<string, string>>;
   readonly value: InputValue;
+  readonly selector?: string;
 }
 
 /** Hash raw values locally, preserving source UTF-16 lengths and category counts. */
@@ -131,7 +132,9 @@ export function prepareInputs(inputs: readonly InputField[]): PreparedInput[] {
       );
     }
     const attributes = Object.fromEntries(
-      Object.entries(field).filter(([key]) => key !== "value"),
+      Object.entries(field).filter(
+        ([key]) => key !== "value" && key !== "selector",
+      ),
     );
     const special = value.replace(/[A-Za-z0-9_\s]/g, "");
     const lower = value.toLowerCase().match(/[a-z]/g)?.length ?? 0;
@@ -139,6 +142,7 @@ export function prepareInputs(inputs: readonly InputField[]): PreparedInput[] {
     const trimmed = value.trim();
     return {
       attributes,
+      ...(field.selector === undefined ? {} : { selector: field.selector }),
       value: {
         length: value.length,
         hash: createHash("sha256").update(value, "utf16le").digest("hex"),
