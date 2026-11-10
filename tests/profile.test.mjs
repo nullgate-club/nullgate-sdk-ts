@@ -556,3 +556,365 @@ test("Target requires an explicit valid local route and keeps proxy credentials 
     },
   );
 });
+
+for (const negotiated of [false, true]) {
+  test(`target transport metadata requires negotiated hello: ${negotiated}`, async (t) => {
+    const localError = Object.assign(
+      new Error("https://user:private@host/?cookie=private"),
+      {
+        code: "ECONNREFUSED",
+      },
+    );
+    const metadata = {
+      code: "CLIENT_TRANSPORT_ERROR",
+      origin: "client",
+      message: "Target transport failed",
+      retryable: null,
+      stage: "target_http",
+      command_id: 1,
+      target: { role: "tags", method: "GET", host: "tags.example" },
+      cause: { kind: "connection", type: "Error", code: "ECONNREFUSED" },
+    };
+    const endpoint = await serve(t, (socket, message, request) => {
+      if (message.type === "start") {
+        assert.equal(request.headers["x-nullgate-error-format"], "1");
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            state_id: nextState,
+            request_id: requestId,
+            ...(negotiated ? { error_format: 1 } : {}),
+          }),
+        );
+        socket.send(
+          JSON.stringify({
+            type: "http",
+            id: 1,
+            request: {
+              role: "tags",
+              url: "https://tags.example/private?cookie=private",
+              method: "GET",
+              headers: {},
+              body: null,
+              credentials: "include",
+            },
+          }),
+        );
+      } else if (message.type === "http.error") {
+        assert.deepEqual(message, {
+          type: "http.error",
+          id: 1,
+          detail: "Target request failed",
+          ...(negotiated ? { error: metadata.cause } : {}),
+        });
+        assert.equal(JSON.stringify(message).includes("private"), false);
+        socket.send(
+          JSON.stringify({
+            type: "error",
+            status: 502,
+            detail: "private service detail",
+            request_id: requestId,
+            ...(negotiated ? { error: metadata } : {}),
+          }),
+        );
+      }
+    });
+    const client = new NullgateClient({
+      apiKey: "key",
+      profileBaseURL: endpoint,
+    });
+    t.after(() => client.close());
+    const session = client.open({ identity, userAgent: "UA" });
+    await assert.rejects(
+      session.profile(
+        params,
+        new Target(
+          async () => {
+            throw localError;
+          },
+          { proxy: null },
+        ),
+      ),
+      (error) => {
+        assert.ok(error instanceof NullgateAPIError);
+        assert.equal(error.targetError, negotiated ? localError : undefined);
+        const { command_id, ...expectedInfo } = metadata;
+        assert.deepEqual(
+          error.errorInfo,
+          negotiated ? { ...expectedInfo, commandId: command_id } : undefined,
+        );
+        assert.equal(inspect(error).includes("private"), false);
+        return true;
+      },
+    );
+  });
+}
+
+test("malformed WS metadata keeps the legacy service failure", async (t) => {
+  const endpoint = await serve(t, (socket, message) => {
+    if (message.type === "start") {
+      socket.send(
+        JSON.stringify({
+          type: "error",
+          status: 502,
+          detail: "legacy failure",
+          request_id: requestId,
+          error: {
+            code: "FUTURE_ERROR",
+            origin: "service",
+            message: "safe",
+            retryable: null,
+            cause: { kind: [] },
+          },
+        }),
+      );
+    }
+  });
+  const client = new NullgateClient({
+    apiKey: "key",
+    profileBaseURL: endpoint,
+  });
+  t.after(() => client.close());
+  const session = client.open({ identity, userAgent: "UA" });
+  await assert.rejects(
+    session.profile(
+      params,
+      new Target(
+        async () => ({ status: 200, headers: {}, body: new Uint8Array() }),
+        { proxy: null },
+      ),
+    ),
+    (error) => {
+      assert.ok(error instanceof NullgateAPIError);
+      assert.equal(error.detail, "legacy failure");
+      assert.equal(error.statusCode, 502);
+      assert.equal(error.errorInfo, undefined);
+      return true;
+    },
+  );
+});
+
+test("closing a negotiated profile cancels target work without reporting transport failure", async (t) => {
+  const entered = Promise.withResolvers();
+  const cancelled = Promise.withResolvers();
+  const endpoint = await serve(t, (socket, message) => {
+    if (message.type === "start") {
+      socket.send(
+        JSON.stringify({
+          type: "hello",
+          state_id: nextState,
+          request_id: requestId,
+          error_format: 1,
+        }),
+      );
+      socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+      socket.send(
+        JSON.stringify({
+          type: "http",
+          id: 1,
+          request: {
+            role: "tags",
+            url: "https://tags.example/tags.js",
+            method: "GET",
+            headers: {},
+            body: null,
+            credentials: "include",
+          },
+        }),
+      );
+    } else {
+      assert.equal(message.type, "close");
+    }
+  });
+  const client = new NullgateClient({
+    apiKey: "key",
+    profileBaseURL: endpoint,
+  });
+  t.after(() => client.close());
+  const session = client.open({ identity, userAgent: "UA" });
+  const target = new Target(
+    async (request) => {
+      entered.resolve(undefined);
+      await once(request.signal, "abort");
+      cancelled.resolve(undefined);
+      throw request.signal.reason;
+    },
+    { proxy: null },
+  );
+  const profile = await session.profile(params, target);
+  await entered.promise;
+  await profile.close();
+  await cancelled.promise;
+  assert.equal(profile.error, undefined);
+});
+
+/** @type {[string, string, unknown, number | undefined][]} */
+const correlationCases = [
+  ["CLIENT_TRANSPORT_ERROR", "client", 1, 1],
+  ["CLIENT_TRANSPORT_ERROR", "client", 2, 2],
+  ["CLIENT_TRANSPORT_ERROR", "client", 3, undefined],
+  ["UPSTREAM_ERROR", "upstream", 1, undefined],
+  ["CLIENT_TRANSPORT_ERROR", "service", 1, undefined],
+  ["CLIENT_TRANSPORT_ERROR", "client", null, undefined],
+  ["CLIENT_TRANSPORT_ERROR", "client", true, undefined],
+  ["CLIENT_TRANSPORT_ERROR", "client", 0, undefined],
+  ["CLIENT_TRANSPORT_ERROR", "client", "1", undefined],
+];
+for (const [code, origin, commandId, expected] of correlationCases) {
+  test(`concurrent target cause correlation: ${code}/${origin}/${commandId}`, async (t) => {
+    const errors = new Map([
+      [1, new Error("private first")],
+      [2, new Error("private second")],
+    ]);
+    const allEntered = Promise.withResolvers();
+    let entered = 0;
+    const callbacks = new Map();
+    const endpoint = await serve(t, (socket, message) => {
+      if (message.type === "start") {
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            state_id: nextState,
+            request_id: requestId,
+            error_format: 1,
+          }),
+        );
+        for (const id of [1, 2, 3]) {
+          socket.send(
+            JSON.stringify({
+              type: "http",
+              id,
+              request: {
+                role: "tags",
+                url: `https://tags.example/${id}`,
+                method: "GET",
+                headers: {},
+                body: null,
+                credentials: "include",
+              },
+            }),
+          );
+        }
+      } else if (
+        message.type === "http.error" ||
+        message.type === "http.result"
+      ) {
+        callbacks.set(message.id, message);
+        if (callbacks.size !== 3) return;
+        assert.equal(callbacks.get(1).type, "http.error");
+        assert.equal(callbacks.get(2).type, "http.error");
+        assert.equal(callbacks.get(3).response.status, 502);
+        socket.send(
+          JSON.stringify({
+            type: "error",
+            status: 502,
+            detail: "legacy service failure",
+            request_id: requestId,
+            error: {
+              code,
+              origin,
+              message: "safe",
+              retryable: null,
+              command_id: commandId,
+            },
+          }),
+        );
+      }
+    });
+    const client = new NullgateClient({
+      apiKey: "key",
+      profileBaseURL: endpoint,
+    });
+    t.after(() => client.close());
+    const session = client.open({ identity, userAgent: "UA" });
+    await assert.rejects(
+      session.profile(
+        params,
+        new Target(
+          async (request) => {
+            if (++entered === 3) allEntered.resolve(undefined);
+            await allEntered.promise;
+            const id = Number(new URL(request.url).pathname.slice(1));
+            if (errors.has(id)) throw errors.get(id);
+            return { status: 502, headers: {}, body: new Uint8Array() };
+          },
+          { proxy: null },
+        ),
+      ),
+      (error) => {
+        assert.ok(error instanceof NullgateAPIError);
+        assert.equal(
+          error.targetError,
+          expected === undefined ? undefined : errors.get(expected),
+        );
+        assert.equal(error.statusCode, 502);
+        assert.equal(error.detail, "legacy service failure");
+        if (
+          typeof commandId !== "number" ||
+          !Number.isSafeInteger(commandId) ||
+          commandId <= 0
+        )
+          assert.equal(error.errorInfo, undefined);
+        return true;
+      },
+    );
+  });
+}
+
+for (const mode of ["stalled", "truncated", "oversized", "cancelled"]) {
+  test(`rejected handshake retains HTTP diagnostics with ${mode} body`, {
+    timeout: 5000,
+  }, async (t) => {
+    const received = Promise.withResolvers();
+    const server = createServer();
+    server.on("upgrade", (_request, socket) => {
+      socket.on("error", () => undefined);
+      socket.on("end", () => socket.destroy());
+      socket.write(
+        `HTTP/1.1 503 Service Unavailable\r\nX-Request-ID: ${requestId}\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\n`,
+      );
+      socket.write('{"detail":"incomplete');
+      received.resolve(undefined);
+      if (mode === "truncated") socket.end();
+      if (mode === "oversized") socket.write(Buffer.alloc(1_048_577));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    t.after(async () => {
+      const closed = once(server, "close");
+      server.close();
+      await closed;
+    });
+    const client = new NullgateClient({
+      apiKey: "key",
+      profileBaseURL: `http://127.0.0.1:${address.port}`,
+      timeoutMs: 300,
+    });
+    t.after(() => client.close());
+    const controller = new AbortController();
+    const reason = new Error("caller cancelled handshake");
+    const session = client.open({ identity, userAgent: "UA" });
+    const pending = session.profile(
+      params,
+      new Target(async () => assert.fail("target fetch must not run"), {
+        proxy: null,
+      }),
+      { signal: controller.signal },
+    );
+    const rejected = assert.rejects(pending, (error) => {
+      if (mode === "cancelled") assert.equal(error, reason);
+      else {
+        assert.ok(error instanceof NullgateAPIError);
+        assert.equal(error.statusCode, 503);
+        assert.equal(error.requestId, requestId);
+        assert.equal(error.errorInfo, undefined);
+      }
+      return true;
+    });
+    await received.promise;
+    if (mode === "cancelled") controller.abort(reason);
+    await rejected;
+  });
+}

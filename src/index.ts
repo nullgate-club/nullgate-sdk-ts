@@ -24,6 +24,7 @@ export {
   type SessionOptions,
 } from "./client.js";
 export { type FindOptions, findProtections } from "./discovery.js";
+export type { ErrorInfo, ErrorTarget, TransportCause } from "./error-info.js";
 export {
   AmbiguousProtectionError,
   NullgateAPIError,

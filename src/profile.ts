@@ -1,4 +1,5 @@
 import WebSocket, { type RawData } from "ws";
+import { parseErrorInfo, transportCause } from "./error-info.js";
 import {
   NullgateAPIError,
   NullgateClosedError,
@@ -89,6 +90,8 @@ export class Profile {
   readonly #tasks = new Set<Promise<void>>();
   readonly #aborted: () => void;
   #startupTimer: NodeJS.Timeout | undefined;
+  #finishHandshake: (() => void) | undefined;
+  #cleanupHandshake: (() => void) | undefined;
   #writeTail: Promise<void> = Promise.resolve();
   #pagehide: PromiseWithResolvers<void> | undefined;
   #requestId: string | undefined;
@@ -96,6 +99,8 @@ export class Profile {
   #isCollected = false;
   #stopped = false;
   #failure: unknown;
+  #errorFormat = false;
+  readonly #targetErrors = new Map<number, unknown>();
 
   private constructor(connection: ProfileConnection) {
     this.#target = connection.target;
@@ -105,7 +110,7 @@ export class Profile {
     this.#aborted = () => this.#fail(this.#signal.reason);
     // agent:false prevents environment proxy adoption on the API connection.
     this.#socket = new WebSocket(connection.url, {
-      headers: { ...connection.headers },
+      headers: { ...connection.headers, "X-Nullgate-Error-Format": "1" },
       agent: false,
       followRedirects: false,
       perMessageDeflate: false,
@@ -115,23 +120,78 @@ export class Profile {
     void this.#ready.promise.catch(() => undefined);
     void this.#collected.promise.catch(() => undefined);
     this.#socket.on("error", () => {
-      if (!this.#stopped)
-        this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      if (!this.#stopped) {
+        if (this.#finishHandshake) this.#finishHandshake();
+        else this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      }
     });
     this.#socket.once("unexpected-response", (_request, response) => {
-      response.resume();
+      if (this.#stopped) {
+        response.destroy();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
       const id = response.headers["x-request-id"];
-      this.#fail(
-        new NullgateAPIError(
-          response.statusCode ?? 0,
-          typeof id === "string" ? id : (this.#requestId ?? null),
-          "Profile WebSocket handshake was rejected",
-        ),
-      );
+      const onData = (chunk: Buffer) => {
+        if (size > 1_048_576) return;
+        size += chunk.length;
+        if (size <= 1_048_576) chunks.push(chunk);
+        else finish();
+      };
+      const cleanup = () => {
+        this.#finishHandshake = undefined;
+        this.#cleanupHandshake = undefined;
+        response.off("data", onData);
+        response.off("end", onEnd);
+        response.off("aborted", onIncomplete);
+        response.off("error", onIncomplete);
+        response.off("close", onIncomplete);
+        // An aborted IncomingMessage can emit its reset error after "aborted".
+        if (!response.closed) {
+          const ignoreReset = () => undefined;
+          response.once("error", ignoreReset);
+          response.once("close", () => response.off("error", ignoreReset));
+        }
+        response.destroy();
+      };
+      const finish = (complete = false) => {
+        if (this.#stopped) return;
+        let body: unknown;
+        try {
+          body =
+            complete && size <= 1_048_576
+              ? JSON.parse(Buffer.concat(chunks).toString("utf8"))
+              : undefined;
+        } catch {
+          body = undefined;
+        }
+        this.#fail(
+          new NullgateAPIError(
+            response.statusCode ?? 0,
+            typeof id === "string" ? id : (this.#requestId ?? null),
+            object(body) && "detail" in body
+              ? body.detail
+              : "Profile WebSocket handshake was rejected",
+            object(body) ? body.error : undefined,
+          ),
+        );
+      };
+      const onEnd = () => finish(true);
+      const onIncomplete = () => finish();
+      this.#finishHandshake = onIncomplete;
+      this.#cleanupHandshake = cleanup;
+      response.on("data", onData);
+      response.once("end", onEnd);
+      response.once("aborted", onIncomplete);
+      response.once("error", onIncomplete);
+      response.once("close", onIncomplete);
     });
     this.#socket.once("close", () => {
-      if (!this.#stopped)
-        this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      if (!this.#stopped) {
+        if (this.#finishHandshake) this.#finishHandshake();
+        else this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      }
     });
     this.#socket.on("message", (data: RawData, binary: boolean) => {
       if (this.#stopped) return;
@@ -158,7 +218,8 @@ export class Profile {
       this.#run(this.#send(connection.start));
     });
     this.#startupTimer = setTimeout(() => {
-      this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      if (this.#finishHandshake) this.#finishHandshake();
+      else this.#fail(new NullgateTransportError(this.#requestId ?? null));
     }, connection.timeoutMs);
     this.#signal.addEventListener("abort", this.#aborted, { once: true });
     if (this.#signal.aborted) this.#aborted();
@@ -294,10 +355,17 @@ export class Profile {
         message.request_id !== this.#requestId
       )
         throw this.#protocol("service error request ID changed");
+      const info = parseErrorInfo(message.error);
       throw new NullgateAPIError(
         message.status,
         message.request_id,
         message.detail,
+        message.error,
+        info?.code === "CLIENT_TRANSPORT_ERROR" &&
+          info.origin === "client" &&
+          info.commandId !== undefined
+          ? this.#targetErrors.get(info.commandId)
+          : undefined,
       );
     }
     if (message.type === "hello") {
@@ -306,11 +374,13 @@ export class Profile {
         !isRequestId(message.request_id) ||
         typeof message.state_id !== "string" ||
         !message.state_id ||
-        /[\r\n]/.test(message.state_id)
+        /[\r\n]/.test(message.state_id) ||
+        (message.error_format !== undefined && message.error_format !== 1)
       ) {
         throw this.#protocol("malformed or duplicate hello");
       }
       this.#requestId = message.request_id;
+      this.#errorFormat = message.error_format === 1;
       rotateState(message.state_id);
       return;
     }
@@ -456,12 +526,15 @@ export class Profile {
     let response: TargetResponse;
     try {
       response = await abortable(this.#target._fetch(request), request.signal);
-    } catch {
+    } catch (error) {
+      if (this.#stopped) return;
+      this.#targetErrors.set(id, error);
       if (!this.#stopped)
         await this.#send({
           type: "http.error",
           id,
           detail: "Target request failed",
+          ...(this.#errorFormat ? { error: transportCause(error) } : {}),
         });
       return;
     }
@@ -569,6 +642,8 @@ export class Profile {
     if (this.#stopped) return this.#closed.promise;
     this.#stopped = true;
     this.#failure = error;
+    this.#targetErrors.clear();
+    this.#cleanupHandshake?.();
     clearTimeout(this.#startupTimer);
     this.#startupTimer = undefined;
     this.#signal.removeEventListener("abort", this.#aborted);

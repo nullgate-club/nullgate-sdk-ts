@@ -563,3 +563,42 @@ test("raw action values are rejected before private input text can leave the pro
     client.close();
   }
 });
+
+test("HTTP error metadata is optional, forward compatible, and never inferred from 502", async (t) => {
+  const metadata = {
+    code: "FUTURE_ERROR",
+    origin: "upstream",
+    message: "safe explanation",
+    retryable: null,
+    target: { role: "tags", method: "GET", host: "tags.example" },
+    cause: { kind: "dns", code: "ENOTFOUND" },
+  };
+  const responses = [undefined, { broken: true }, metadata];
+  const baseURL = await serve(t, async (req, res) => {
+    await json(req);
+    assert.equal(req.headers["x-nullgate-error-format"], "1");
+    res.writeHead(502, { "X-Request-ID": requestId });
+    res.end(
+      JSON.stringify({
+        detail: "private validation",
+        error: responses.shift(),
+      }),
+    );
+  });
+  const client = new NullgateClient({ apiKey, baseURL });
+  t.after(() => client.close());
+  const session = client.open({ identity, userAgent: "UA" });
+  for (const expected of [undefined, undefined, metadata]) {
+    await assert.rejects(session.solve(params), (error) => {
+      assert.ok(error instanceof NullgateAPIError);
+      assert.equal(error.statusCode, 502);
+      assert.equal(error.requestId, requestId);
+      assert.equal(error.detail, "private validation");
+      assert.deepEqual(error.errorInfo, expected);
+      assert.equal(inspect(error).includes("private validation"), false);
+      assert.equal(String(error).includes("CLIENT_TRANSPORT_ERROR"), false);
+      if (expected) assert.match(String(error), /FUTURE_ERROR\/upstream/);
+      return true;
+    });
+  }
+});

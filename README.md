@@ -106,6 +106,11 @@ Keep the native target session and its cookie jar across documents.
 requests and closes all sessions. Both support `Symbol.asyncDispose`. A solution
 can report through its originating client until that client closes.
 
+`X-State-ID` is server continuation, not the document ID, browser UUID or target
+cookie. Do not share live state across unrelated documents/workers. Close active
+profiles before sessions and the client; close the caller-owned target client
+separately, preserving its jar for the browsing flow.
+
 ## Discovery and typed parameters
 
 `new Page(url, html)` stores caller-supplied content.
@@ -269,6 +274,71 @@ gets a new `Page` and profile handle; a bfcache restore is not fabricated by clo
 Report `true` means HTTP delivery, not diagnostic acceptance, target clearance, or refund. Reports have a finite three-second default timeout, no redirects, no retries, and no API key/state/cookie headers. Remote HTTP/network failures return `false`; cancellation, closed-client, configuration, and programming errors propagate.
 
 Client configuration supports `baseURL`, `profileBaseURL`, `analyticsURL`, `timeoutMs`, `reportTimeoutMs`, and a native-fetch-compatible HTTP `fetch` seam. The profiling URL defaults to `https://threatmetrix.nullgate.club`; HTTP(S) is converted to WS(S) for the profile handshake. Its API-key, user-agent, and state headers are sent using maintained `ws`, not a handwritten WebSocket implementation. `timeoutMs` bounds profile startup and each ICE gather; it does not end a ready document. API failures expose `NullgateAPIError.statusCode`, `.requestId`, and `.detail`; detail is deliberately excluded from normal error inspection because server validation details can contain private inputs. Malformed successful results raise `NullgateProtocolError` rather than inventing defaults.
+
+## Errors and sensor outcomes
+
+`NullgateAPIError` exposes optional typed `errorInfo` alongside `statusCode`,
+`requestId` and private `detail`. `ErrorInfo`, `ErrorTarget` and `TransportCause`
+are exported types. For generation and profiling service errors:
+
+```typescript
+import { NullgateAPIError } from "@nullgate/sdk";
+
+function describeServiceError(error: unknown): void {
+  if (!(error instanceof NullgateAPIError)) throw error;
+  console.error("request_id=", error.requestId, "status=", error.statusCode);
+  const info = error.errorInfo;
+  if (info) {
+    console.error(
+      "code=",
+      info.code,
+      "origin=",
+      info.origin,
+      "stage=",
+      info.stage,
+    );
+    if (info.target)
+      console.error(info.target.role, info.target.method, info.target.host);
+    if (info.cause) console.error("cause_kind=", info.cause.kind);
+  }
+}
+```
+
+`CLIENT_TRANSPORT_ERROR` (`origin: "client"`, `stage: "target_http"`) means the
+ThreatMetrix SDK sent `http.error`: your adapter could not produce a valid target
+response. Its compatibility status `502` is **not HTTP 502 received from the
+target** or proof of a Nullgate outage. Original local errors are available
+privately as `targetError` only when metadata identifies the matching failed
+command; legacy or unrelated errors do not inherit them. Do not log raw messages.
+Return actual target responses, including `4xx`/`5xx`, with raw bytes rather than throwing for status.
+SDK → Nullgate transport failures and genuine service/upstream errors remain
+separate; not every `502` is a client failure.
+
+New SDKs negotiate `X-Nullgate-Error-Format: 1` and enrich `http.error` only after
+the service confirms support. Old clients keep the unchanged legacy wire; new
+clients work with old servers with absent `errorInfo`. Fall back to status and
+request ID, never infer this code from an untyped `502`. Unknown codes/causes are
+valid; nullable `retryable` is a hint, not an automatic retry. Check page, source
+text and params for invalid/unsupported input; discovery is not proof of support.
+Do not blindly replay paid work after a lost response.
+
+For support, share SDK version, operation, UTC time, request ID, status, available
+code/origin/stage, safe target role/method/host and cause kind/type/code. Never
+post API keys, cookies, state IDs, proxy credentials, HAR files, private URLs,
+HTML/scripts, field values/hashes, generated bodies, raw detail or exceptions.
+See [diagnostics](https://docs.nullgate.club/en/diagnostics).
+
+Four sends do not guarantee `_abck` threshold `0`. `isEnough` is an ordinary-send
+stop check; threshold `0` is a stop signal, not target acceptance or successful
+credentials. Count completed target sensor responses in the current cookie
+generation, not solves; reset on a new nonnegative generation. An unknown limit
+is not success. For a deliberate manual count experiment, repeat
+`session.solve(new SensorParams(sensor, script, { cookies }))` in the same
+document, await `solution.wait()`, POST its exact body through your target client,
+read the response and refresh cookies before the next call. Your loop chooses
+the count; there is no `send_count` option, hidden retry or change to the normal
+cookie gate. Extra sends are not promised to help. Generation, POST completion
+and protected-page/application acceptance are different; even `200` may be a block.
 
 ## Browser-like target example
 

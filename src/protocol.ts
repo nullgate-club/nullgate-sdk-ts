@@ -69,6 +69,9 @@ export function normalizeResponse(
       body !== null && typeof body === "object" && "detail" in body
         ? body.detail
         : body,
+      body !== null && typeof body === "object" && "error" in body
+        ? body.error
+        : undefined,
     );
   }
   const invalid = (message: string): never => {

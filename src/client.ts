@@ -170,6 +170,7 @@ export class NullgateClient {
       Authorization: `Bearer ${this.#apiKey}`,
       "User-Agent": userAgent,
       "Content-Type": "application/json",
+      "X-Nullgate-Error-Format": "1",
     };
     if (stateId !== undefined) headers["X-State-ID"] = stateId;
     try {
