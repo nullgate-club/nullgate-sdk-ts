@@ -1,8 +1,7 @@
 {
   "name": "@nullgate/sdk",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Typed Nullgate SDK with local protection discovery and isolated generation sessions",
+  "version": "2.0.0",
+  "description": "Prepare target requests from observed pages with Nullgate",
   "type": "module",
   "license": "UNLICENSED",
   "engines": {
@@ -31,7 +30,7 @@
     "test": "node --test tests/*.test.mjs",
     "check": "biome check . && npm run typecheck && npm run build && npm test",
     "prepare": "npm run build",
-    "example": "node examples/target.ts"
+    "example": "node examples/akamai.ts"
   },
   "dependencies": {
     "css-select": "7.0.0",
@@ -46,7 +45,6 @@
     "@types/multicast-dns": "7.2.4",
     "@types/node": "24.10.0",
     "@types/ws": "8.18.2",
-    "typescript": "7.0.2",
-    "wreq-js": "3.2.0"
+    "typescript": "7.0.2"
   }
 }

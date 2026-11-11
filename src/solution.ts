@@ -1,43 +1,86 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { inspect } from "node:util";
+import { NullgateError } from "./errors.js";
+import { httpURL } from "./models.js";
 
 export interface OperationOptions {
   readonly signal?: AbortSignal;
 }
-
-export interface SolutionData {
-  readonly url: string;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly body: string;
-  /** Absolute earliest target POST time in Unix seconds. */
-  readonly sendAt: number;
-  readonly requestId: string;
+interface ResultData {
+  url: string;
+  body: string;
+  metadata1: string;
+  headers: Readonly<Record<string, string>>;
+  sendAt: number;
+  requestId: string;
+}
+export function resultData(
+  data: Record<string, unknown>,
+  pageUrl: string,
+  amazon = false,
+): ResultData {
+  const invalid = (): never => {
+    throw new NullgateError(
+      "protocol_error",
+      "Malformed generated response",
+      typeof data.request_id === "string" ? data.request_id : null,
+    );
+  };
+  const request = amazon ? data : data.request;
+  if (
+    !request ||
+    typeof request !== "object" ||
+    Array.isArray(request) ||
+    typeof data.request_id !== "string" ||
+    !data.request_id
+  )
+    return invalid();
+  const value = request as Record<string, unknown>;
+  if (
+    typeof value.send_at !== "number" ||
+    !Number.isFinite(value.send_at) ||
+    !value.headers ||
+    typeof value.headers !== "object" ||
+    Array.isArray(value.headers)
+  )
+    return invalid();
+  const headers = new Headers();
+  try {
+    for (const [name, field] of Object.entries(value.headers)) {
+      if (typeof field !== "string") return invalid();
+      headers.set(name, field);
+    }
+    if (!amazon) {
+      headers.set("Referer", pageUrl);
+      headers.set("Origin", new URL(pageUrl).origin);
+      if (typeof value.url !== "string" || typeof value.body !== "string")
+        return invalid();
+      const url = httpURL(value.url, "request.url");
+      if (url.username || url.password) return invalid();
+    } else if (typeof value.metadata1 !== "string" || !value.metadata1)
+      return invalid();
+  } catch {
+    return invalid();
+  }
+  return {
+    url: amazon ? "" : (value.url as string),
+    body: amazon ? "" : (value.body as string),
+    metadata1: amazon ? (value.metadata1 as string) : "",
+    headers: Object.freeze(Object.fromEntries(headers)),
+    sendAt: value.send_at,
+    requestId: data.request_id,
+  };
 }
 
-export type Reporter = (
-  requestId: string,
-  options?: OperationOptions,
-) => Promise<boolean>;
-
-/** A ready target request. Sending it and judging the target remain caller-owned. */
-export class Solution implements SolutionData {
-  readonly method = "POST";
-  readonly url: string;
+class TimedResult {
   readonly headers: Readonly<Record<string, string>>;
-  readonly body: string;
   readonly sendAt: number;
   readonly requestId: string;
-  readonly #reporter: Reporter;
-
-  constructor(data: SolutionData, reporter: Reporter) {
-    this.url = data.url;
-    this.headers = Object.freeze({ ...data.headers });
-    this.body = data.body;
+  constructor(data: ResultData) {
+    this.headers = data.headers;
     this.sendAt = data.sendAt;
     this.requestId = data.requestId;
-    this.#reporter = reporter;
-    Object.freeze(this);
   }
-
   async wait(options: OperationOptions = {}): Promise<void> {
     options.signal?.throwIfAborted();
     let remaining = this.sendAt * 1000 - Date.now();
@@ -50,9 +93,34 @@ export class Solution implements SolutionData {
       remaining = this.sendAt * 1000 - Date.now();
     }
   }
-
-  /** True means HTTP delivery, not accepted diagnostics, target clearance, or refund. */
-  report(options: OperationOptions = {}): Promise<boolean> {
-    return this.#reporter(this.requestId, options);
+}
+export class Request extends TimedResult {
+  readonly url: string;
+  readonly #body: string;
+  constructor(data: ResultData) {
+    super(data);
+    this.url = data.url;
+    this.#body = data.body;
+    Object.freeze(this);
+  }
+  get body(): string {
+    return this.#body;
+  }
+  [inspect.custom](): string {
+    return `Request { url: ${this.url}, body: [REDACTED] }`;
+  }
+}
+export class FwcimResult extends TimedResult {
+  readonly #metadata1: string;
+  constructor(data: ResultData) {
+    super(data);
+    this.#metadata1 = data.metadata1;
+    Object.freeze(this);
+  }
+  get metadata1(): string {
+    return this.#metadata1;
+  }
+  [inspect.custom](): string {
+    return "FwcimResult { metadata1: [REDACTED] }";
   }
 }

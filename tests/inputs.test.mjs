@@ -1,88 +1,136 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { abckCounters, isEnough, prepareInputs } from "@nullgate/sdk";
+import { Nullgate } from "@nullgate/sdk";
 
-test("input summaries retain attributes and order without raw UTF-16 values", () => {
-  /** @type {import('@nullgate/sdk').InputField[]} */
-  const fields = [
-    { name: "credential", type: "password", value: "s🔑&" },
-    { name: "surrogate", value: "\ud800" },
-    { name: "missing" },
-  ];
-  const prepared = prepareInputs(fields);
-  assert.deepEqual(
-    prepared.map((field) => field.attributes.name),
-    ["credential", "surrogate", "missing"],
-  );
-  assert.deepEqual(
-    prepared.map((field) => field.value.length),
-    [4, 1, 0],
-  );
-  assert.deepEqual(
-    prepared.map((field) => field.value.hash),
-    [
-      createHash("sha256")
-        .update(Buffer.from("73003dd811dd2600", "hex"))
-        .digest("hex"),
-      createHash("sha256").update(Buffer.from("00d8", "hex")).digest("hex"),
-      createHash("sha256").update("").digest("hex"),
-    ],
-  );
-  assert.ok(prepared.every((field) => !("value" in field.attributes)));
-  assert.equal(fields[0]?.value, "s🔑&");
-  assert.equal(JSON.stringify(prepared).includes("s🔑&"), false);
-});
-
-test("input categories use JS whitespace, Unicode lowercase, and UTF-16 lengths", () => {
-  /** @type {Array<[string, number[]]>} */
-  const cases = [
-    ["AZaz09_ !", [9, 1, 4, 2]],
-    ["ÉİKß😀\ud800", [7, 7, 2, 0]],
-    [
-      "_ \t\n\u00a0\u1680\u2000\u200a\u2028\u2029\u202f\u205f\u3000\ufeff",
-      [14, 0, 0, 0],
-    ],
-    ["\u0085\u001c\u001d\u001e\u001f", [5, 5, 0, 0]],
-  ];
-  for (const [value, expected] of cases) {
-    assert.deepEqual(prepareInputs([{ value }])[0]?.value.counts, expected);
-  }
-});
-
-test("hash facts retain signed UTF-16 and native trim boundaries", () => {
-  const cases = [
-    ["", 0, 0, 0],
-    ["A_9 😀İ\u00a0", -902761640, 386520648, 7],
-    ["\u0085\ufeff", 69402, 133, 1],
-    ["\ufeff\u00a0😀 \u0085\tX\u3000\ufeff", -2113306057, 927999095, 6],
-    [" \0 ", 30784, 0, 1],
-    ["\u180ex\u200b", 5929761, 5929761, 3],
-    ["\ud800", 55296, 55296, 1],
-  ];
-  for (const [text, hash31, trimmedHash31, trimmedLength] of cases) {
-    const value = prepareInputs([{ value: String(text) }])[0]?.value;
-    assert.deepEqual(
-      [value?.hash31, value?.trimmed_hash31, value?.trimmed_length],
-      [hash31, trimmedHash31, trimmedLength],
+for (const [value, counts, hash31, trimmedHash31, trimmedLength] of [
+  ["A_9 😀İ\u00a0", [8, 3, 2, 1], -902761640, 386520648, 7],
+  ["\ud800", [1, 1, 0, 0], 55296, 55296, 1],
+  ["", [0, 0, 0, 0], 0, 0, 0],
+]) {
+  test(`summarizes UTF-16 inputs locally: ${JSON.stringify(value)}`, async (t) => {
+    /** @type {Record<string, any>} */ let body = {};
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit | undefined} */ init,
+      ) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json({
+          request: {
+            url: "https://shop.example/sensor",
+            body: "payload",
+            headers: {},
+            send_at: 0,
+          },
+          session: "next",
+          request_id: "id",
+        });
+      },
     );
-  }
-});
+    const page = new Nullgate("fake")
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example",
+        '<input id="email"><script src="/sensor"></script>',
+      );
+    await page.sensor({
+      script: "source",
+      cookies: {},
+      inputs: { email: String(value) },
+    });
+    assert.deepEqual(body.inputs[0].value, {
+      length: String(value).length,
+      hash: createHash("sha256").update(String(value), "utf16le").digest("hex"),
+      counts,
+      hash31,
+      trimmed_hash31: trimmedHash31,
+      trimmed_length: trimmedLength,
+    });
+    assert.deepEqual(body.inputs[0].attributes, { id: "email" });
+  });
+}
 
-test("cookie counters follow URI decoding and decimal Number prefix semantics", () => {
-  assert.deepEqual(abckCounters("x%7E%20%2B2tail%7Ez%7E3rest"), [2, 3]);
-  assert.deepEqual(
-    abckCounters("x~9007199254740993~z~0"),
-    [9007199254740992, 0],
+for (const html of [
+  '<input id="secret" type="password">',
+  '<input id="secret" autocomplete="current-password">',
+  '<input id="secret" name="ap_password">',
+  '<input type="password" value="" value="secret">',
+  '<template><input type="password" value="secret"></template>',
+  '<textarea autocomplete="new-password">secret</textarea>',
+]) {
+  test(`refuses password observations and HTML: ${html}`, async (t) => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      calls++;
+      throw new Error("must not send");
+    });
+    const page = new Nullgate("fake")
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example",
+        `<form id="login">${html}</form><script src="/sensor"></script>`,
+      );
+    await assert.rejects(
+      page.sensor({
+        script: "source",
+        cookies: {},
+        inputs: { secret: "private" },
+      }),
+      { code: "invalid_request" },
+    );
+    await assert.rejects(
+      page.fwcim({
+        form: "#login",
+        timing: { navigationStart: 1 },
+        inputs: { secret: "private" },
+      }),
+      { code: "invalid_request" },
+    );
+    assert.equal(calls, 0);
+  });
+}
+
+test("cookie jars select only product cookies for the actual page URL", async (t) => {
+  /** @type {string[]} */ const requested = [];
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (
+      /** @type {RequestInfo | URL} */ _url,
+      /** @type {RequestInit | undefined} */ init,
+    ) => {
+      assert.deepEqual(JSON.parse(String(init?.body)).cookies, {
+        _abck: "observed",
+      });
+      return Response.json({
+        request: {
+          url: "https://shop.example/sensor",
+          body: "payload",
+          headers: {},
+          send_at: 0,
+        },
+        session: "next",
+        request_id: "id",
+      });
+    },
   );
-  assert.deepEqual(abckCounters("x~0x10~z~-2tail"), [0, -2]);
-  assert.deepEqual(abckCounters("x~\u00852~z~4"), [-1, 4]);
-  for (const malformed of [undefined, "", "a~2", "a%~2~c~4", "a~2~c~%FF"]) {
-    assert.deepEqual(abckCounters(malformed), [-1, -1]);
-    assert.equal(isEnough(malformed, 99), false);
-  }
-  assert.equal(isEnough("x~2~z~0", 1), false);
-  assert.equal(isEnough("x~2~z~0", 2), true);
-  assert.equal(isEnough("x~0~z~0"), true);
-  assert.equal(isEnough("x~-2~z~0"), true);
+  const page = new Nullgate("fake")
+    .session({ userAgent: "browser" })
+    .page("https://shop.example/login", '<script src="/sensor"></script>');
+  await page.sensor({
+    script: "source",
+    cookies: {
+      async getCookies(url) {
+        requested.push(url);
+        return [
+          { key: "_abck", value: "observed" },
+          { key: "private", value: "omit" },
+        ];
+      },
+    },
+  });
+  assert.deepEqual(requested, ["https://shop.example/login"]);
 });

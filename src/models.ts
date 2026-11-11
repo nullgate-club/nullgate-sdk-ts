@@ -1,11 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Protection as AkamaiProtection } from "./akamai.js";
-import type { ThreatMetrix, ThreatMetrixCollector } from "./threatmetrix.js";
+import type { ThreatMetrix } from "./threatmetrix.js";
 
-export type Protection =
-  | AkamaiProtection
-  | ThreatMetrix
-  | ThreatMetrixCollector;
+export type Protection = AkamaiProtection | ThreatMetrix;
 
 export function httpURL(value: string, name: string): URL {
   let url: URL;
@@ -14,7 +11,12 @@ export function httpURL(value: string, name: string): URL {
   } catch {
     throw new TypeError(`${name} must be an absolute HTTP(S) URL`);
   }
-  if (!["http:", "https:"].includes(url.protocol) || !url.hostname) {
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    !url.hostname ||
+    url.username ||
+    url.password
+  ) {
     throw new TypeError(`${name} must be an absolute HTTP(S) URL`);
   }
   return url;

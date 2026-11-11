@@ -1,24 +1,11 @@
 import { Parser } from "htmlparser2";
 import { Pixel, Sbsd, Sensor } from "./akamai.js";
-import { AmbiguousProtectionError } from "./errors.js";
 import { Page, type Protection, type ScriptReference } from "./models.js";
 import { isThreatMetrixTagsURL, ThreatMetrix } from "./threatmetrix.js";
 
-export interface FindOptions {
-  readonly where?: (protection: Protection) => boolean;
-  readonly panic?: boolean;
-}
-
-/** Discover locally; reject multiple candidates unless the caller opts out. */
-export function findProtections(
-  page: Page,
-  options: FindOptions = {},
-): Protection[] {
-  if (!(page instanceof Page))
-    throw new TypeError("findProtections requires a Page");
-  if (options.where !== undefined && typeof options.where !== "function") {
-    throw new TypeError("where must be a protection predicate");
-  }
+/** Discover observed classic scripts locally without fetching them. */
+export function findProtections(page: Page): Protection[] {
+  if (!(page instanceof Page)) throw new TypeError("Discovery requires a page");
   const document = new URL(page.url);
   let baseSource: string | undefined;
   const sources: ScriptReference[] = [];
@@ -156,10 +143,5 @@ export function findProtections(
       found.push(new Sensor(page, scriptURL, { provenance: reference }));
     }
   }
-  const candidates =
-    options.where === undefined ? found : found.filter(options.where);
-  if (candidates.length > 1 && options.panic !== false) {
-    throw new AmbiguousProtectionError(candidates);
-  }
-  return candidates;
+  return found;
 }

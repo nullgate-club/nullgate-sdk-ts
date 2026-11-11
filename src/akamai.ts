@@ -83,7 +83,6 @@ export class Sbsd {
 }
 
 export type Protection = Pixel | Sensor | Sbsd;
-export type Cookies = Readonly<Record<string, string>>;
 export type InputField = Readonly<Record<string, string>>;
 
 export type InputValue = {
@@ -161,100 +160,4 @@ function hash31(value: string): number {
     result = (Math.imul(result, 31) + value.charCodeAt(index)) | 0;
   }
   return result;
-}
-
-export class PixelParams {
-  readonly kind = "pixel";
-  readonly protection: Pixel;
-  readonly script: string;
-
-  constructor(protection: Pixel, script: string) {
-    if (!(protection instanceof Pixel))
-      throw new TypeError("PixelParams requires a Pixel protection");
-    if (typeof script !== "string")
-      throw new TypeError("script must be source text");
-    this.protection = protection;
-    this.script = script;
-    Object.freeze(this);
-  }
-}
-
-export interface SensorOptions {
-  readonly cookies?: Cookies | null;
-  readonly inputs?: readonly InputField[] | null;
-  readonly actions?: readonly Action[] | null;
-}
-
-export class SensorParams {
-  readonly kind = "sensor";
-  readonly protection: Sensor;
-  readonly script: string;
-  readonly cookies: Cookies | null;
-  readonly inputs: readonly InputField[] | null;
-  readonly actions: readonly Action[] | null;
-
-  constructor(protection: Sensor, script: string, options: SensorOptions = {}) {
-    if (!(protection instanceof Sensor))
-      throw new TypeError("SensorParams requires a Sensor protection");
-    if (typeof script !== "string")
-      throw new TypeError("script must be source text");
-    this.protection = protection;
-    this.script = script;
-    this.cookies = options.cookies ?? null;
-    this.inputs = options.inputs ?? null;
-    this.actions = options.actions ?? null;
-    Object.freeze(this);
-  }
-}
-
-export class SbsdParams {
-  readonly kind = "sbsd";
-  readonly protection: Sbsd;
-  readonly script: string;
-  readonly cookies: Cookies | null;
-
-  constructor(
-    protection: Sbsd,
-    script: string,
-    options: Pick<SensorOptions, "cookies"> = {},
-  ) {
-    if (!(protection instanceof Sbsd))
-      throw new TypeError("SbsdParams requires an Sbsd protection");
-    if (typeof script !== "string")
-      throw new TypeError("script must be source text");
-    this.protection = protection;
-    this.script = script;
-    this.cookies = options.cookies ?? null;
-    Object.freeze(this);
-  }
-}
-
-export type Params = PixelParams | SensorParams | SbsdParams;
-
-/** Return [response limit, generation]; unavailable counters are -1. */
-export function abckCounters(
-  value: string | null | undefined,
-): readonly [number, number] {
-  if (value == null) return [-1, -1];
-  let parts: string[];
-  try {
-    parts = decodeURIComponent(value).split("~");
-  } catch {
-    return [-1, -1];
-  }
-  if (parts.length < 4) return [-1, -1];
-  const counter = (part: string | undefined): number => {
-    const match = part?.match(/^\s*([+-]?[0-9]+)/);
-    return match?.[1] === undefined ? -1 : Number(match[1]);
-  };
-  return [counter(parts[1]), counter(parts[3])];
-}
-
-/** Ordinary-send eligibility only, never proof that the target accepted a payload. */
-export function isEnough(
-  value: string | null | undefined,
-  responseCount = 0,
-): boolean {
-  const [limit] = abckCounters(value);
-  return limit !== -1 && responseCount >= limit;
 }

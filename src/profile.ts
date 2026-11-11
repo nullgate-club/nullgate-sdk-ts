@@ -1,12 +1,7 @@
 import WebSocket, { type RawData } from "ws";
-import { parseErrorInfo, transportCause } from "./error-info.js";
-import {
-  NullgateAPIError,
-  NullgateClosedError,
-  NullgateProtocolError,
-  NullgateTransportError,
-} from "./errors.js";
-import type { OperationOptions, Reporter } from "./solution.js";
+import { transportCause } from "./error-info.js";
+import { NullgateError, retryDelay } from "./errors.js";
+import type { OperationOptions } from "./solution.js";
 import {
   Target,
   type TargetRequest,
@@ -27,7 +22,6 @@ interface ProfileConnection {
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
   readonly rotateState: (stateId: string) => void;
-  readonly reporter: Reporter;
 }
 
 interface IceOperation {
@@ -78,7 +72,6 @@ function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
 export class Profile {
   readonly #socket: WebSocket;
   readonly #target: Target;
-  readonly #reporter: Reporter;
   readonly #signal: AbortSignal;
   readonly #timeoutMs: number;
   readonly #operations = new AbortController();
@@ -99,19 +92,16 @@ export class Profile {
   #isCollected = false;
   #stopped = false;
   #failure: unknown;
-  #errorFormat = false;
   #maintenanceRetryAfter: number | undefined;
-  readonly #targetErrors = new Map<number, unknown>();
 
   private constructor(connection: ProfileConnection) {
     this.#target = connection.target;
-    this.#reporter = connection.reporter;
     this.#signal = connection.signal;
     this.#timeoutMs = connection.timeoutMs;
     this.#aborted = () => this.#fail(this.#signal.reason);
     // agent:false prevents environment proxy adoption on the API connection.
     this.#socket = new WebSocket(connection.url, {
-      headers: { ...connection.headers, "X-Nullgate-Error-Format": "1" },
+      headers: { ...connection.headers },
       agent: false,
       followRedirects: false,
       perMessageDeflate: false,
@@ -123,7 +113,14 @@ export class Profile {
     this.#socket.on("error", () => {
       if (!this.#stopped) {
         if (this.#finishHandshake) this.#finishHandshake();
-        else this.#fail(new NullgateTransportError(this.#requestId ?? null));
+        else
+          this.#fail(
+            new NullgateError(
+              "transport_error",
+              "Profile connection failed",
+              this.#requestId ?? null,
+            ),
+          );
       }
     });
     this.#socket.once("unexpected-response", (_request, response) => {
@@ -132,19 +129,8 @@ export class Profile {
         return;
       }
       const retryAfter = response.headers["retry-after"];
-      const maintenance =
-        response.statusCode === 503 &&
-        response.headers["x-nullgate-maintenance"] === "1" &&
-        typeof retryAfter === "string" &&
-        /^\d+(?:\.\d+)?$/.test(retryAfter) &&
-        Number(retryAfter) <= 5;
-      if (!maintenance) {
-        const stateId = response.headers["x-state-id"];
-        if (typeof stateId === "string") connection.rotateState(stateId);
-      }
       const chunks: Buffer[] = [];
       let size = 0;
-      const id = response.headers["x-request-id"];
       const onData = (chunk: Buffer) => {
         if (size > 1_048_576) return;
         size += chunk.length;
@@ -178,14 +164,22 @@ export class Profile {
         } catch {
           body = undefined;
         }
+        if (object(body) && body.code === "maintenance")
+          this.#maintenanceRetryAfter = retryDelay(
+            typeof retryAfter === "string" ? retryAfter : null,
+          );
         this.#fail(
-          new NullgateAPIError(
-            response.statusCode ?? 0,
-            typeof id === "string" ? id : (this.#requestId ?? null),
-            object(body) && "detail" in body
-              ? body.detail
-              : "Profile WebSocket handshake was rejected",
-            object(body) ? body.error : undefined,
+          new NullgateError(
+            object(body) && typeof body.code === "string"
+              ? body.code
+              : "protocol_error",
+            object(body) && typeof body.message === "string"
+              ? body.message
+              : "Profile handshake rejected",
+            object(body) && typeof body.request_id === "string"
+              ? body.request_id
+              : null,
+            response.statusCode ?? null,
           ),
         );
       };
@@ -198,15 +192,18 @@ export class Profile {
       response.once("aborted", onIncomplete);
       response.once("error", onIncomplete);
       response.once("close", onIncomplete);
-      if (maintenance) {
-        this.#maintenanceRetryAfter = Number(retryAfter);
-        finish();
-      }
     });
     this.#socket.once("close", () => {
       if (!this.#stopped) {
         if (this.#finishHandshake) this.#finishHandshake();
-        else this.#fail(new NullgateTransportError(this.#requestId ?? null));
+        else
+          this.#fail(
+            new NullgateError(
+              "transport_error",
+              "Profile connection failed",
+              this.#requestId ?? null,
+            ),
+          );
       }
     });
     this.#socket.on("message", (data: RawData, binary: boolean) => {
@@ -235,7 +232,14 @@ export class Profile {
     });
     this.#startupTimer = setTimeout(() => {
       if (this.#finishHandshake) this.#finishHandshake();
-      else this.#fail(new NullgateTransportError(this.#requestId ?? null));
+      else
+        this.#fail(
+          new NullgateError(
+            "timeout",
+            "Profile startup timed out",
+            this.#requestId ?? null,
+          ),
+        );
     }, connection.timeoutMs);
     this.#signal.addEventListener("abort", this.#aborted, { once: true });
     if (this.#signal.aborted) this.#aborted();
@@ -299,13 +303,20 @@ export class Profile {
     const atMs = options.atMs ?? Date.now();
     const persisted = options.persisted ?? false;
     if (!Number.isFinite(atMs) || atMs < 0)
-      throw new RangeError(
+      throw new NullgateError(
+        "invalid_request",
         "pagehide atMs must be finite nonnegative milliseconds",
       );
     if (typeof persisted !== "boolean")
-      throw new TypeError("pagehide persisted must be a boolean");
+      throw new NullgateError(
+        "invalid_request",
+        "pagehide persisted must be a boolean",
+      );
     if (this.#pagehide !== undefined)
-      throw new TypeError("A pagehide is already awaiting acknowledgement");
+      throw new NullgateError(
+        "invalid_request",
+        "A pagehide is already awaiting acknowledgement",
+      );
     const completion = Promise.withResolvers<void>();
     this.#pagehide = completion;
     void completion.promise.catch(() => undefined);
@@ -324,11 +335,6 @@ export class Profile {
     }
   }
 
-  /** True means analytics HTTP delivery, not target acceptance or a refund. */
-  report(options: OperationOptions = {}): Promise<boolean> {
-    return this.#reporter(this.requestId, options);
-  }
-
   close(): Promise<void> {
     return this.#stop(undefined, true);
   }
@@ -339,11 +345,15 @@ export class Profile {
 
   #assertActive(): void {
     if (this.#failure !== undefined) throw this.#failure;
-    if (this.#stopped) throw new NullgateClosedError("profile");
+    if (this.#stopped) throw new NullgateError("closed", "Profile is closed");
   }
 
-  #protocol(message: string): NullgateProtocolError {
-    return new NullgateProtocolError(message, 0, this.#requestId ?? null);
+  #protocol(message: string): NullgateError {
+    return new NullgateError(
+      "protocol_error",
+      message,
+      this.#requestId ?? null,
+    );
   }
 
   #correlation(value: unknown): number {
@@ -362,47 +372,29 @@ export class Profile {
       throw this.#protocol("malformed profile message");
     if (message.type === "error") {
       if (
-        typeof message.status !== "number" ||
-        !Number.isInteger(message.status) ||
-        message.status < 400 ||
-        message.status > 599 ||
-        typeof message.detail !== "string" ||
-        (message.request_id !== null && !isRequestId(message.request_id))
-      ) {
-        throw this.#protocol("malformed service error");
-      }
-      if (
-        this.#requestId !== undefined &&
-        message.request_id !== this.#requestId
+        typeof message.code !== "string" ||
+        typeof message.message !== "string" ||
+        typeof message.request_id !== "string"
       )
-        throw this.#protocol("service error request ID changed");
-      const info = parseErrorInfo(message.error);
-      throw new NullgateAPIError(
-        message.status,
+        throw this.#protocol("Malformed service error");
+      throw new NullgateError(
+        message.code,
+        message.message,
         message.request_id,
-        message.detail,
-        message.error,
-        info?.code === "CLIENT_TRANSPORT_ERROR" &&
-          info.origin === "client" &&
-          info.commandId !== undefined
-          ? this.#targetErrors.get(info.commandId)
-          : undefined,
       );
     }
     if (message.type === "hello") {
       if (
         this.#requestId !== undefined ||
         !isRequestId(message.request_id) ||
-        typeof message.state_id !== "string" ||
-        !message.state_id ||
-        /[\r\n]/.test(message.state_id) ||
-        (message.error_format !== undefined && message.error_format !== 1)
+        typeof message.session !== "string" ||
+        !message.session ||
+        /[\r\n]/.test(message.session)
       ) {
         throw this.#protocol("malformed or duplicate hello");
       }
       this.#requestId = message.request_id;
-      this.#errorFormat = message.error_format === 1;
-      rotateState(message.state_id);
+      rotateState(message.session);
       return;
     }
     if (this.#requestId === undefined)
@@ -451,7 +443,7 @@ export class Profile {
         if (operation === undefined || operation.released)
           throw this.#protocol("unknown or duplicate ICE release ID");
         operation.released = true;
-        operation.abort.abort(new NullgateClosedError("profile"));
+        operation.abort.abort(new NullgateError("closed", "Profile is closed"));
         if (operation.allocation !== undefined)
           this.#run(operation.allocation.close());
         return;
@@ -549,13 +541,12 @@ export class Profile {
       response = await abortable(this.#target._fetch(request), request.signal);
     } catch (error) {
       if (this.#stopped) return;
-      this.#targetErrors.set(id, error);
       if (!this.#stopped)
         await this.#send({
           type: "http.error",
           id,
           detail: "Target request failed",
-          ...(this.#errorFormat ? { error: transportCause(error) } : {}),
+          error: transportCause(error),
         });
       return;
     }
@@ -618,7 +609,11 @@ export class Profile {
     });
     const completion = await operation.allocation.completion;
     if (completion === "failed" && !this.#stopped && !operation.released)
-      throw new NullgateTransportError(this.#requestId ?? null);
+      throw new NullgateError(
+        "transport_error",
+        "TURN connection failed",
+        this.#requestId ?? null,
+      );
   }
 
   #run(task: Promise<void>): void {
@@ -638,16 +633,32 @@ export class Profile {
     const sending = this.#writeTail.then(() => {
       if (this.#stopped && !closing) this.#assertActive();
       if (this.#socket.readyState !== WebSocket.OPEN)
-        throw new NullgateTransportError(this.#requestId ?? null);
+        throw new NullgateError(
+          "transport_error",
+          "Profile connection failed",
+          this.#requestId ?? null,
+        );
       const { promise, resolve, reject } = Promise.withResolvers<void>();
       try {
         this.#socket.send(encoded, (error) => {
           if (error)
-            reject(new NullgateTransportError(this.#requestId ?? null));
+            reject(
+              new NullgateError(
+                "transport_error",
+                "Profile connection failed",
+                this.#requestId ?? null,
+              ),
+            );
           else resolve();
         });
       } catch {
-        reject(new NullgateTransportError(this.#requestId ?? null));
+        reject(
+          new NullgateError(
+            "transport_error",
+            "Profile connection failed",
+            this.#requestId ?? null,
+          ),
+        );
       }
       return promise;
     });
@@ -663,12 +674,11 @@ export class Profile {
     if (this.#stopped) return this.#closed.promise;
     this.#stopped = true;
     this.#failure = error;
-    this.#targetErrors.clear();
     this.#cleanupHandshake?.();
     clearTimeout(this.#startupTimer);
     this.#startupTimer = undefined;
     this.#signal.removeEventListener("abort", this.#aborted);
-    const reason = error ?? new NullgateClosedError("profile");
+    const reason = error ?? new NullgateError("closed", "Profile is closed");
     this.#operations.abort(reason);
     this.#ready.reject(reason);
     this.#collected.reject(reason);

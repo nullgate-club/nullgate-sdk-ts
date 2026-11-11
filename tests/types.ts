@@ -1,142 +1,39 @@
-import {
-  AmbiguousProtectionError,
-  type ClientOptions,
-  type FindOptions,
-  type FwcimAction,
-  findProtections,
-  NullgateClient,
-  type Page,
-  Pixel,
-  PixelParams,
-  type Protection,
-  Sbsd,
-  SbsdParams,
-  Sensor,
-  SensorParams,
-  type Solution,
-  type Target,
-  ThreatMetrix,
-  ThreatMetrixCollector,
-  ThreatMetrixParams,
-} from "@nullgate/sdk";
+import { Nullgate, NullgateError, type TargetFetch } from "@nullgate/sdk";
 
-/** Compiled, not executed: consumer-facing discriminants and variant pairing. */
-export async function typedConsumer(
-  options: ClientOptions,
-  protection: Protection,
-  signal: AbortSignal,
-  target: Target,
-): Promise<void> {
-  const client = new NullgateClient(options);
-  const session = client.open({
-    identity: "11111111-2222-4333-8444-555555555555",
-    userAgent: "Windows Chrome146",
-  });
-  try {
-    let solution: Solution;
-    switch (protection.kind) {
-      case "profile": {
-        const profile = await session.profile(
-          new ThreatMetrixParams(protection),
-          target,
-          { signal },
-        );
-        try {
-          await profile.waitForCollected({ signal });
-          await profile.pagehide({
-            atMs: Date.now(),
-            persisted: false,
-            signal,
-          });
-          const delivered: boolean = await profile.report({ signal });
-          void delivered;
-        } finally {
-          await profile.close();
-        }
-        return;
-      }
-      case "pixel":
-        solution = await session.solve(new PixelParams(protection, "source"), {
-          signal,
-        });
-        break;
-      case "sensor":
-        solution = await session.solve(
-          new SensorParams(protection, "source", {
-            inputs: [{ type: "password", value: "kept local" }],
-            actions: [],
-            cookies: {},
-          }),
-          { signal },
-        );
-        break;
-      case "sbsd":
-        solution = await session.solve(
-          new SbsdParams(protection, "source", { cookies: {} }),
-          { signal },
-        );
-        break;
-    }
-    await solution.wait({ signal });
-    const body: string = solution.body;
-    const delivered: boolean = await solution.report({ signal });
-    void body;
-    void delivered;
-  } finally {
-    await session[Symbol.asyncDispose]();
-    await client[Symbol.asyncDispose]();
-  }
-}
-
-export function rejectedPairings(page: Page): void {
-  const discovery: FindOptions = { panic: false };
-  const candidates: Protection[] = findProtections(page, discovery);
-  const retained: readonly Protection[] = new AmbiguousProtectionError(
-    candidates,
-  ).candidates;
-  void retained;
-  // @ts-expect-error The ambiguity option must be a boolean.
-  findProtections(page, { panic: "false" });
-  const pixel = new Pixel(page, "https://target.example/akam/13/abc", "12");
-  const sensor = new Sensor(page, "https://target.example/sensor");
-  const sbsd = new Sbsd(
-    page,
-    "https://target.example/sbsd?v=11111111-2222-4333-8444-555555555555",
-  );
-  // @ts-expect-error Pixel parameters cannot contain a Sensor.
-  new PixelParams(sensor, "source");
-  // @ts-expect-error Sensor parameters cannot contain a Pixel.
-  new SensorParams(pixel, "source");
-  // @ts-expect-error SBSD parameters cannot contain a Sensor.
-  new SbsdParams(sensor, "source");
-  // @ts-expect-error Pixel parameters cannot contain an SBSD.
-  new PixelParams(sbsd, "source");
-  const tmx = new ThreatMetrix(
-    page,
-    "https://tags.example/tags.js?org_id=org&session_id=session",
-  );
-  // @ts-expect-error Profile parameters cannot contain an Akamai protection.
-  new ThreatMetrixParams(sensor);
-  // @ts-expect-error Akamai parameters cannot contain a ThreatMetrix protection.
-  new SensorParams(tmx, "source");
-  const collector = new ThreatMetrixCollector(
-    page,
-    "https://collector.example/fp?opaque=value",
-    "org",
-    "session",
-  );
-  new ThreatMetrixParams(collector);
-  // @ts-expect-error Akamai parameters cannot contain a direct collector.
-  new SensorParams(collector, "source");
-}
-
-export function fwcimActionContract(): void {
-  const event: FwcimAction = { type: "touchmove", touches: [{ x: -1, y: 2 }] };
-  const invalid: FwcimAction = {
-    type: "input",
-    // @ts-expect-error FWCIM never accepts values, including prepared summaries.
-    value: { length: 1, hash: "hash", counts: [1, 0, 1, 0] },
-  };
-  void event;
-  void invalid;
-}
+const ng = new Nullgate("fake-key", {
+  baseUrl: "http://localhost:8080",
+  timeout: 30,
+});
+const page = ng
+  .session({ userAgent: "browser" })
+  .page("https://shop.example", "<html></html>");
+const sensorUrl: string | null = page.sensorUrl;
+void sensorUrl;
+void page.sensor({
+  script: "source",
+  cookies: new Map([["_abck", "cookie"]]),
+  inputs: { email: "user@example.com" },
+});
+void page.pixel({ script: "source", scriptUrl: "https://shop.example/pixel" });
+void page.sbsd({ script: "source", cookies: {} });
+void page.fwcim({
+  form: "#login",
+  timing: { navigationStart: 1 },
+  inputs: [
+    {
+      id: "email",
+      value: "user@example.com",
+      geometry: { width: 10, height: 20 },
+    },
+  ],
+});
+const send: TargetFetch = async () => ({
+  status: 200,
+  headers: {},
+  body: new Uint8Array(),
+});
+void page.threatmetrix({ send });
+void ng.account();
+void ng.usage({ interval: "day" });
+const error: Error = new NullgateError("invalid_page", "Invalid page");
+void error;

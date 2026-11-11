@@ -1,5 +1,3 @@
-import { setTimeout as sleep } from "node:timers/promises";
-import { inspect } from "node:util";
 import { selectAll } from "css-select";
 import {
   type AnyNode,
@@ -8,10 +6,8 @@ import {
   type Element,
 } from "domhandler";
 import { Parser } from "htmlparser2";
-import { type Cookies, type InputValue, prepareInputs } from "./akamai.js";
-import { NullgateAPIError, NullgateProtocolError } from "./errors.js";
+import { type InputValue, prepareInputs } from "./akamai.js";
 import { Page } from "./models.js";
-import type { OperationOptions } from "./solution.js";
 
 /** FWCIM accepts event facts and local summaries, never an input value. */
 export interface FwcimAction {
@@ -146,7 +142,7 @@ function sensitiveControl(node: Element): boolean {
   );
 }
 
-function documentFor(page: Page) {
+export function documentFor(page: Page) {
   if (!(page instanceof Page)) throw new TypeError("FWCIM requires a Page");
   const handler = new (class extends DomHandler {
     #nonemptyValue = "";
@@ -201,6 +197,15 @@ function prepareDocumentInputs(
     document.children,
   );
   return inputs.map((input) => {
+    if (
+      input.id &&
+      !input.name &&
+      !input.selector &&
+      !controls.some((node) => node.attribs.id === input.id)
+    ) {
+      const { id, ...rest } = input;
+      input = { ...rest, name: id };
+    }
     if (
       Object.keys(input).some(
         (key) =>
@@ -392,228 +397,38 @@ function prepareFwcimActions(
   return actions;
 }
 
-export interface FwcimOptions {
-  /** Actual caller observations, not synthesized browser measurements. */
-  readonly performanceTiming: Readonly<Record<string, number>>;
-  readonly cookies?: Cookies;
-  readonly formSelector?: string;
-  readonly inputs?: readonly FwcimInput[];
-  readonly actions?: readonly FwcimAction[];
-  readonly submitted?: boolean;
-  readonly referrer?: string;
-  readonly historyLength?: number;
-}
-
-export class FwcimParams {
-  readonly page: Page;
-  readonly #body: string;
-
-  constructor(page: Page, options: FwcimOptions) {
-    const document = documentFor(page);
-    options = detached(options);
-    if (
-      !options?.performanceTiming ||
-      typeof options.performanceTiming !== "object" ||
-      Array.isArray(options.performanceTiming) ||
-      page.startedAtMs <= 0 ||
-      Object.values(options.performanceTiming).some(
-        (value) =>
-          !Number.isSafeInteger(value) ||
-          value < 0 ||
-          (value !== 0 && value < page.startedAtMs),
-      ) ||
-      options.performanceTiming.navigationStart !== page.startedAtMs
-    )
-      throw new TypeError(
-        "Observed performanceTiming.navigationStart must match Page.startedAtMs",
-      );
-    if (
-      options.formSelector !== undefined &&
-      (typeof options.formSelector !== "string" || !options.formSelector.trim())
-    )
-      throw new TypeError("formSelector must be nonempty");
-    let form: Element | undefined;
-    if (options.formSelector !== undefined) {
-      let matches: Element[];
-      try {
-        matches = selectAll<AnyNode, Element>(
-          options.formSelector,
-          document.children,
-        );
-      } catch {
-        throw new TypeError("Invalid formSelector CSS selector");
-      }
-      form = matches[0];
-      if (matches.length !== 1 || form?.name !== "form")
-        throw new TypeError("formSelector must select exactly one form");
-    }
-    if (
-      options.historyLength !== undefined &&
-      (!Number.isSafeInteger(options.historyLength) ||
-        options.historyLength < 1)
-    )
-      throw new TypeError("historyLength must be a positive integer");
-    if (options.referrer !== undefined && typeof options.referrer !== "string")
-      throw new TypeError("referrer must be a string");
-    if (
-      options.submitted !== undefined &&
-      typeof options.submitted !== "boolean"
-    )
-      throw new TypeError("submitted must be a boolean");
-    if (
-      options.cookies !== undefined &&
-      (options.cookies === null ||
-        typeof options.cookies !== "object" ||
-        Array.isArray(options.cookies) ||
-        Object.values(options.cookies).some(
-          (value) => typeof value !== "string",
-        ))
-    )
-      throw new TypeError("cookies must be a string mapping");
-    this.page = page;
-    this.#body = JSON.stringify({
-      website: {
-        url: page.url,
-        html: page.html,
-        document_id: page.documentId,
-        started_at_ms: page.startedAtMs,
-        ...(options.referrer === undefined
-          ? {}
-          : { referrer: options.referrer }),
-        ...(options.historyLength === undefined
-          ? {}
-          : { history_length: options.historyLength }),
-      },
-      ...(options.cookies === undefined ? {} : { cookies: options.cookies }),
-      ...(options.formSelector === undefined
-        ? {}
-        : { form_selector: options.formSelector }),
-      ...(options.inputs === undefined
-        ? {}
-        : { inputs: prepareDocumentInputs(document, options.inputs, form) }),
-      ...(options.actions === undefined
-        ? {}
-        : { actions: prepareFwcimActions(options.actions) }),
-      submitted: options.submitted ?? true,
-      performance_timing: options.performanceTiming,
-    });
-    Object.freeze(this);
-  }
-
-  /** @internal */
-  _request(timezone: string | undefined): PreparedFwcimRequest {
-    return {
-      operation: "fwcim",
-      body:
-        timezone === undefined
-          ? this.#body
-          : JSON.stringify({ ...JSON.parse(this.#body), timezone }),
-    };
-  }
-}
-
-/** @internal */
-export interface PreparedFwcimRequest {
-  readonly operation: "fwcim";
-  readonly body: string;
-}
-
-export interface FwcimSolutionData {
-  readonly metadata1: string;
-  readonly sendAt: number;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly requestId: string;
-}
-
-/** Sensitive form field, not a ready login request. Never log metadata1. */
-export class FwcimSolution {
-  readonly #metadata1: string;
-  readonly sendAt: number;
-  readonly headers: Readonly<Record<string, string>>;
-  readonly requestId: string;
-
-  constructor(data: FwcimSolutionData) {
-    this.#metadata1 = data.metadata1;
-    this.sendAt = data.sendAt;
-    this.headers = Object.freeze({ ...data.headers });
-    this.requestId = data.requestId;
-    Object.freeze(this);
-  }
-
-  get metadata1(): string {
-    return this.#metadata1;
-  }
-
-  [inspect.custom](): string {
-    return `FwcimSolution { metadata1: [REDACTED], sendAt: ${this.sendAt} }`;
-  }
-
-  async wait(options: OperationOptions = {}): Promise<void> {
-    options.signal?.throwIfAborted();
-    let remaining = this.sendAt * 1000 - Date.now();
-    while (remaining > 0) {
-      await sleep(
-        Math.min(remaining, 2_147_483_647),
-        undefined,
-        options.signal === undefined ? {} : { signal: options.signal },
-      );
-      remaining = this.sendAt * 1000 - Date.now();
-    }
-  }
-}
-
-/** @internal */
-export function normalizeFwcimResponse(
-  response: Response,
-  body: unknown,
-): FwcimSolutionData {
-  const requestId = response.headers.get("X-Request-ID");
-  if (!response.ok)
-    throw new NullgateAPIError(
-      response.status,
-      requestId,
-      body !== null && typeof body === "object" && "detail" in body
-        ? body.detail
-        : body,
-      body !== null && typeof body === "object" && "error" in body
-        ? body.error
-        : undefined,
-    );
-  const invalid = (message: string): never => {
-    throw new NullgateProtocolError(message, response.status, requestId);
-  };
-  if (!requestId) return invalid("missing X-Request-ID");
-  if (body === null || typeof body !== "object" || Array.isArray(body))
-    return invalid("expected a JSON object");
-  const data = body as {
-    metadata1?: unknown;
-    send_at?: unknown;
-    headers?: unknown;
-  };
-  if (typeof data.metadata1 !== "string" || !data.metadata1)
-    return invalid("metadata1 must be a nonempty string");
-  if (typeof data.send_at !== "number" || !Number.isFinite(data.send_at))
-    return invalid("send_at must be a finite Unix timestamp");
+export function prepareFwcim(
+  page: Page,
+  formSelector: string,
+  timing: Readonly<Record<string, number>>,
+  inputs: readonly FwcimInput[],
+  actions: readonly FwcimAction[],
+): Record<string, unknown> {
+  const document = documentFor(page);
   if (
-    data.headers === null ||
-    typeof data.headers !== "object" ||
-    Array.isArray(data.headers)
+    !timing ||
+    !Number.isSafeInteger(timing.navigationStart) ||
+    (timing.navigationStart ?? 0) <= 0 ||
+    Object.values(timing).some(
+      (value) => !Number.isSafeInteger(value) || value < 0,
+    )
   )
-    return invalid("headers must be a string mapping");
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(data.headers)) {
-    if (typeof value !== "string")
-      return invalid("headers must be a string mapping");
-    try {
-      headers.set(name, value);
-    } catch {
-      return invalid("headers contain an invalid HTTP field");
-    }
+    throw new TypeError(
+      "timing must contain observed navigationStart milliseconds",
+    );
+  let matches: Element[];
+  try {
+    matches = selectAll<AnyNode, Element>(formSelector, document.children);
+  } catch {
+    throw new TypeError("Invalid form selector");
   }
+  const form = matches[0];
+  if (matches.length !== 1 || form?.name !== "form")
+    throw new TypeError("form must select exactly one form");
   return {
-    metadata1: data.metadata1,
-    sendAt: data.send_at,
-    headers: Object.fromEntries(headers),
-    requestId,
+    form_selector: formSelector,
+    performance_timing: { ...timing },
+    inputs: prepareDocumentInputs(document, detached(inputs), form),
+    actions: prepareFwcimActions(detached(actions)),
   };
 }
