@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Nullgate } from "@nullgate/sdk";
+import { Nullgate, prepareInputs } from "@nullgate/sdk";
 
 const html =
   '<form id="signin"><input id="ap_email"><input name="nickname"><input id="password" type="password"></form><input id="outside">';
@@ -87,5 +87,78 @@ for (const inputs of [
       { code: "invalid_inputs" },
     );
     assert.equal(sent, false);
+  });
+}
+
+for (const additions of [
+  {},
+  {
+    checksum: 0,
+    text: "",
+    geometry: { width: 0, height: 0, left: -1, top: -2 },
+  },
+  { checksum: 2 ** 32 - 1, text: "observed" },
+  { checksum: null, text: null, geometry: null },
+]) {
+  test(`Amazon preserves prepared nonpassword facts ${JSON.stringify(additions)}`, async () => {
+    const [summary] = prepareInputs([{ id: "ap_email", value: "observed" }]);
+    assert.ok(summary);
+    const input = { ...summary, ...additions };
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        assert.deepEqual(JSON.parse(String(init?.body)).inputs, [input]);
+        return Response.json({
+          metadata1: "opaque",
+          headers: {},
+          send_at: 0,
+          session: "next",
+          request_id: "id",
+        });
+      },
+    });
+    await client
+      .session({ userAgent: "browser" })
+      .page("https://shop.example", html)
+      .fwcim({
+        form: "#signin",
+        timing: { navigationStart: 1 },
+        inputs: [input],
+      });
+  });
+}
+for (const [
+  id,
+  additions,
+] of /** @type {[string, Record<string, unknown>][]} */ ([
+  ["password", { checksum: 0 }],
+  ["password", { checksum: null }],
+  ["password", { text: "" }],
+  ["password", { text: null }],
+  ["outside", {}],
+  ["missing", {}],
+  ["ap_email", { checksum: -1 }],
+  ["ap_email", { checksum: 2 ** 32 }],
+  ["ap_email", { checksum: 1.5 }],
+  ["ap_email", { geometry: { width: -1, height: 2 } }],
+  ["ap_email", { geometry: { width: 1, height: Infinity } }],
+  ["ap_email", { attributes: { id: "ap_email", type: "text" } }],
+  ["ap_email", { extra: "unsupported" }],
+])) {
+  test(`Amazon rejects invalid prepared facts ${id} ${JSON.stringify(additions)}`, async () => {
+    const [summary] = prepareInputs([{ id, value: "observed" }]);
+    assert.ok(summary);
+    const page = new Nullgate("fake", {
+      fetch: async () => assert.fail("must not send"),
+    })
+      .session({ userAgent: "browser" })
+      .page("https://shop.example", html);
+    await assert.rejects(
+      page.fwcim({
+        form: "#signin",
+        timing: { navigationStart: 1 },
+        inputs: /** @type {any} */ ([{ ...summary, ...additions }]),
+      }),
+      { code: "invalid_inputs" },
+    );
   });
 }

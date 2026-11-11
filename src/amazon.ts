@@ -6,7 +6,12 @@ import {
   type Element,
 } from "domhandler";
 import { Parser } from "htmlparser2";
-import { type InputValue, prepareInputs } from "./akamai.js";
+import {
+  type InputValue,
+  type PreparedInput,
+  prepareInputs,
+  validatePreparedInput,
+} from "./akamai.js";
 import { Page } from "./models.js";
 
 /** FWCIM accepts event facts and local summaries, never an input value. */
@@ -97,10 +102,10 @@ export interface FwcimInput {
 export interface PreparedFwcimInput {
   readonly attributes: Readonly<Record<string, string>>;
   readonly value: InputValue;
-  readonly checksum: number;
+  readonly checksum?: number | null;
   readonly selector?: string;
   readonly geometry?: FwcimGeometry | null;
-  readonly text?: string;
+  readonly text?: string | null;
 }
 
 // CRC32 over CESU-8: encode each JavaScript UTF-16 code unit independently.
@@ -183,7 +188,7 @@ export function documentFor(page: Page) {
   return document;
 }
 
-export function inputFields<T extends FwcimInput>(
+export function inputFields<T extends FwcimInput | PreparedFwcimInput>(
   page: Page,
   inputs: Readonly<Record<string, string>> | readonly T[] | null | undefined,
 ): (T | FwcimInput)[] {
@@ -200,7 +205,7 @@ export function inputFields<T extends FwcimInput>(
 /** Match the actual HTML control before handling any raw observation. */
 export function prepareFwcimInputs(
   page: Page,
-  inputs: readonly FwcimInput[],
+  inputs: readonly (FwcimInput | PreparedFwcimInput)[],
 ): PreparedFwcimInput[] {
   const document = documentFor(page);
   return prepareDocumentInputs(document, detached(inputs));
@@ -208,14 +213,47 @@ export function prepareFwcimInputs(
 
 function prepareDocumentInputs(
   document: Document,
-  inputs: readonly FwcimInput[],
+  inputs: readonly (FwcimInput | PreparedFwcimInput)[],
   form?: Element,
 ): PreparedFwcimInput[] {
   const controls = selectAll<AnyNode, Element>(
     "input,textarea",
     document.children,
   );
-  return inputs.map((input) => {
+  return inputs.map((observation) => {
+    let prepared: PreparedInput | undefined;
+    let input: FwcimInput;
+    if ("attributes" in observation) {
+      const {
+        checksum: observedChecksum,
+        text,
+        geometry,
+        ...summary
+      } = observation;
+      prepared = validatePreparedInput(summary);
+      if (
+        Object.keys(prepared.attributes).some(
+          (key) => !["id", "name"].includes(key),
+        ) ||
+        ("checksum" in observation &&
+          observedChecksum !== null &&
+          (!Number.isInteger(observedChecksum) ||
+            Number(observedChecksum) < 0 ||
+            Number(observedChecksum) >= 2 ** 32)) ||
+        ("text" in observation && text !== null && typeof text !== "string") ||
+        ("geometry" in observation &&
+          geometry !== null &&
+          (typeof geometry !== "object" || Array.isArray(geometry)))
+      )
+        throw new TypeError("Invalid prepared FWCIM input");
+      input = {
+        ...prepared.attributes,
+        ...(prepared.selector === undefined
+          ? {}
+          : { selector: prepared.selector }),
+        ...(geometry === undefined ? {} : { geometry }),
+      };
+    } else input = observation;
     if (
       Object.keys(input).some(
         (key) =>
@@ -267,10 +305,13 @@ function prepareDocumentInputs(
       if (!belongs)
         throw new TypeError("FWCIM input must belong to the selected form");
     }
-    if (sensitiveControl(node))
+    if (
+      sensitiveControl(node) &&
+      (!prepared || "checksum" in observation || "text" in observation)
+    )
       throw new TypeError("Password observations are not allowed");
     const value = input.value ?? "";
-    if (input.text !== undefined && input.text !== value)
+    if (!prepared && input.text !== undefined && input.text !== value)
       throw new TypeError("FWCIM canvas text must match the observed value");
     if (input.geometry != null) {
       const geometry = input.geometry;
@@ -290,7 +331,16 @@ function prepareDocumentInputs(
           "FWCIM geometry requires finite nonnegative dimensions",
         );
     }
-    const [prepared] = prepareInputs([
+    if (prepared) {
+      const original = observation as PreparedFwcimInput;
+      return {
+        ...prepared,
+        ...("checksum" in original ? { checksum: original.checksum } : {}),
+        ...("geometry" in original ? { geometry: original.geometry } : {}),
+        ...("text" in original ? { text: original.text } : {}),
+      } as PreparedFwcimInput;
+    }
+    const [hashed] = prepareInputs([
       {
         ...(input.id === undefined ? {} : { id: input.id }),
         ...(input.name === undefined ? {} : { name: input.name }),
@@ -298,9 +348,9 @@ function prepareDocumentInputs(
         value,
       },
     ]);
-    if (prepared === undefined) throw new TypeError("Missing input summary");
+    if (hashed === undefined) throw new TypeError("Missing input summary");
     return {
-      ...prepared,
+      ...hashed,
       checksum: checksum(value),
       ...(input.geometry === undefined
         ? {}
@@ -415,7 +465,7 @@ export function prepareFwcim(
   page: Page,
   formSelector: string | null,
   timing: Readonly<Record<string, number>>,
-  inputs: readonly FwcimInput[],
+  inputs: readonly (FwcimInput | PreparedFwcimInput)[],
   actions: readonly FwcimAction[],
 ): Record<string, unknown> {
   const document = documentFor(page);

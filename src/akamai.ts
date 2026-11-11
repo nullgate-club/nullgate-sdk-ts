@@ -88,7 +88,7 @@ export type InputField = Readonly<Record<string, string>>;
 export type InputValue = {
   readonly length: number;
   readonly hash: string;
-  readonly counts: readonly [number, number, number, number];
+  readonly counts?: readonly [number, number, number, number];
   readonly hash31?: number;
   readonly trimmed_hash31?: number;
   readonly trimmed_length?: number;
@@ -116,6 +116,99 @@ export interface PreparedInput {
   readonly attributes: Readonly<Record<string, string>>;
   readonly value: InputValue;
   readonly selector?: string;
+}
+
+/** @internal Validate and detach an already-redacted observation without adding facts. */
+export function validatePreparedInput(input: unknown): PreparedInput {
+  if (input === null || typeof input !== "object" || Array.isArray(input))
+    throw new TypeError("Invalid prepared input");
+  const fields = input as Record<string, unknown>;
+  if (
+    Object.keys(fields).some(
+      (key) => !["attributes", "value", "selector"].includes(key),
+    ) ||
+    fields.attributes === null ||
+    typeof fields.attributes !== "object" ||
+    Array.isArray(fields.attributes) ||
+    Object.entries(fields.attributes).some(
+      ([key, value]) =>
+        ["value", "selector"].includes(key) || typeof value !== "string",
+    ) ||
+    ("selector" in fields &&
+      (typeof fields.selector !== "string" || fields.selector.length === 0))
+  )
+    throw new TypeError("Invalid prepared input attributes or selector");
+  const value = fields.value as Record<string, unknown> | null;
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          "length",
+          "hash",
+          "counts",
+          "hash31",
+          "trimmed_hash31",
+          "trimmed_length",
+        ].includes(key),
+    ) ||
+    !Number.isInteger(value.length) ||
+    Number(value.length) < 0 ||
+    typeof value.hash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.hash)
+  )
+    throw new TypeError("Invalid prepared input value");
+  for (const key of ["hash31", "trimmed_hash31"])
+    if (
+      key in value &&
+      (!Number.isInteger(value[key]) ||
+        Number(value[key]) < -(2 ** 31) ||
+        Number(value[key]) >= 2 ** 31)
+    )
+      throw new TypeError("Input hashes must be signed 32-bit integers");
+  if (
+    "trimmed_length" in value &&
+    (!Number.isInteger(value.trimmed_length) ||
+      Number(value.trimmed_length) < 0 ||
+      Number(value.trimmed_length) > Number(value.length) ||
+      (value.trimmed_length === 0 &&
+        "trimmed_hash31" in value &&
+        value.trimmed_hash31 !== 0))
+  )
+    throw new TypeError("Invalid prepared trimmed input length");
+  if ("counts" in value) {
+    const counts = value.counts;
+    if (
+      !Array.isArray(counts) ||
+      counts.length !== 4 ||
+      counts.some((count) => !Number.isInteger(count) || count < 0) ||
+      counts[0] !== value.length ||
+      counts[1] + counts[3] > Number(value.length) ||
+      counts[2] + counts[3] > Number(value.length)
+    )
+      throw new TypeError("Invalid prepared input counts");
+  }
+  return {
+    attributes: Object.fromEntries(Object.entries(fields.attributes)),
+    value: {
+      ...value,
+      length: Number(value.length),
+      hash: value.hash,
+      ...("counts" in value
+        ? {
+            counts: [...(value.counts as number[])] as [
+              number,
+              number,
+              number,
+              number,
+            ],
+          }
+        : {}),
+    } as InputValue,
+    ...("selector" in fields ? { selector: fields.selector as string } : {}),
+  };
 }
 
 /** Hash raw values locally, preserving source UTF-16 lengths and category counts. */
@@ -160,4 +253,32 @@ function hash31(value: string): number {
     result = (Math.imul(result, 31) + value.charCodeAt(index)) | 0;
   }
   return result;
+}
+
+/** Return [response limit, generation]; unavailable counters are -1. */
+export function abckCounters(
+  value: string | null | undefined,
+): readonly [number, number] {
+  if (value == null) return [-1, -1];
+  let parts: string[];
+  try {
+    parts = decodeURIComponent(value).split("~");
+  } catch {
+    return [-1, -1];
+  }
+  if (parts.length < 4) return [-1, -1];
+  const counter = (part: string | undefined): number => {
+    const match = part?.match(/^\s*([+-]?[0-9]+)/);
+    return match?.[1] === undefined ? -1 : Number(match[1]);
+  };
+  return [counter(parts[1]), counter(parts[3])];
+}
+
+/** Ordinary-send eligibility only, never proof that the target accepted a payload. */
+export function isEnough(
+  value: string | null | undefined,
+  responseCount = 0,
+): boolean {
+  const [limit] = abckCounters(value);
+  return limit !== -1 && responseCount >= limit;
 }

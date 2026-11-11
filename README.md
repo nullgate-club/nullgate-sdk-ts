@@ -49,12 +49,12 @@ const sent = await fetch(sensor.url, {
 console.log(sent.status);
 ```
 
-Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL. Results preserve server header casing and order.
-
-Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
-
-ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`, or pass `collector: { url, orgId, sessionId }` for [Kleinanzeigen](examples/kleinanzeigen.ts). Call `await tmx.pagehide()` when leaving.
-
-Errors: catch `NullgateError` and inspect `code`, `message`, `requestId`, and `status`. Maintenance retries are automatic.
+- Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL. Results preserve server header casing and order.
+- API transport: `new Nullgate(key, { fetch })` injects API HTTP only, never target requests or the ThreatMetrix socket.
+- Inputs: `prepareInputs([{ id: "password", value }])` returns `PreparedInput[]` accepted by sensor and FWCIM without sending raw passwords.
+- Cookies: `abckCounters(value)` returns `[limit, generation]`; `isEnough(value, responseCount)` checks ordinary-send eligibility, not target acceptance.
+- Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
+- ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`, or pass `collector: { url, orgId, sessionId }` for [Kleinanzeigen](examples/kleinanzeigen.ts). Call `await tmx.pagehide()` when leaving.
+- Errors: catch `NullgateError` and inspect `code`, `message`, `requestId`, and `status`. Maintenance retries are automatic.
 
 [Documentation](https://nullgate.club) · [Examples](examples) · Check: `npm run check`.

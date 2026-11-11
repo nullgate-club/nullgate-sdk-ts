@@ -1,5 +1,18 @@
-export type { Action, InputField, InputValue } from "./akamai.js";
-export type { FwcimAction, FwcimGeometry, FwcimInput } from "./amazon.js";
+export {
+  type Action,
+  abckCounters,
+  type InputField,
+  type InputValue,
+  isEnough,
+  type PreparedInput,
+  prepareInputs,
+} from "./akamai.js";
+export type {
+  FwcimAction,
+  FwcimGeometry,
+  FwcimInput,
+  PreparedFwcimInput,
+} from "./amazon.js";
 export {
   type Account,
   type ClientOptions,

@@ -102,7 +102,15 @@ test("profile sends the flat start, preserves binary HTTP, continues session and
       socket.send(JSON.stringify({ type: "pagehide.done" }));
     } else if (message.type === "close") socket.close();
   });
-  const document = page(new Nullgate("fake", { baseUrl }));
+  const document = page(
+    new Nullgate("fake", {
+      baseUrl,
+      fetch: async () =>
+        assert.fail(
+          "API fetch must not handle the profile socket or target requests",
+        ),
+    }),
+  );
   /** @type {import('@nullgate/sdk').TargetFetch} */
   const send = async (request) => {
     assert.equal(request.credentials, "omit");

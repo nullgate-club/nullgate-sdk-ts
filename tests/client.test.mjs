@@ -360,3 +360,77 @@ for (const [operation, expected] of Object.entries({
     else await document.sbsd({ script: "source", cookies });
   });
 }
+
+test("injected fetch receives every API operation and maintenance attempt", async () => {
+  /** @type {string[]} */ const paths = [];
+  const client = new Nullgate("fake", {
+    fetch: async (url) => {
+      const path = new URL(String(url)).pathname;
+      paths.push(path);
+      if (
+        path === "/akamai/sensor" &&
+        paths.filter((value) => value === path).length === 1
+      )
+        return Response.json(
+          { code: "maintenance", message: "Try later", request_id: "id" },
+          { status: 503, headers: { "Retry-After": "0" } },
+        );
+      if (path.startsWith("/account"))
+        return Response.json({
+          created_at: "2026-01-01T00:00:00Z",
+          prices_per_1000: {},
+        });
+      return Response.json(
+        path === "/amazon/fwcim"
+          ? wire.amazon.components.schemas.Generated.examples[0]
+          : wire.akamai.paths[path].post.responses["200"].content[
+              "application/json"
+            ].example,
+      );
+    },
+  });
+  await client.account();
+  await client.usage();
+  const page = client.session({ userAgent: "browser" }).page(url, html);
+  await page.sensor({ script: "source", cookies: {} });
+  await page.pixel({ script: "source" });
+  await page.sbsd({ script: "source", cookies: {} });
+  await page.fwcim({
+    form: "#login",
+    timing: { navigationStart: 1 },
+    inputs: [],
+  });
+  assert.deepEqual(paths, [
+    "/account",
+    "/account/usage",
+    "/akamai/sensor",
+    "/akamai/sensor",
+    "/akamai/pixel",
+    "/akamai/sbsd",
+    "/amazon/fwcim",
+  ]);
+});
+for (const failure of ["http", "transport"]) {
+  test(`injected fetch ${failure} failure uses the public error`, async () => {
+    const client = new Nullgate("fake", {
+      fetch: async () => {
+        if (failure === "transport")
+          throw new Error("private transport details");
+        return Response.json(
+          {
+            code: "invalid_request",
+            message: "Invalid request",
+            request_id: "failed",
+          },
+          { status: 400 },
+        );
+      },
+    });
+    await assert.rejects(client.account(), {
+      name: "NullgateError",
+      code: failure === "http" ? "invalid_request" : "transport_error",
+      status: failure === "http" ? 400 : null,
+      requestId: failure === "http" ? "failed" : null,
+    });
+  });
+}

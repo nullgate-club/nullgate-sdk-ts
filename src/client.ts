@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { type Action, type InputField, prepareActions } from "./akamai.js";
+import {
+  type Action,
+  type InputField,
+  type PreparedInput,
+  prepareActions,
+  validatePreparedInput,
+} from "./akamai.js";
 import {
   documentFor,
   type FwcimAction,
   type FwcimInput,
   inputFields,
+  type PreparedFwcimInput,
   prepareFwcim,
   prepareFwcimInputs,
 } from "./amazon.js";
@@ -24,6 +31,8 @@ import {
 export interface ClientOptions {
   readonly baseUrl?: string;
   readonly timeout?: number;
+  /** API HTTP requests only, never target requests or the ThreatMetrix socket. */
+  readonly fetch?: typeof globalThis.fetch;
 }
 export interface SessionOptions {
   readonly userAgent: string;
@@ -47,7 +56,7 @@ export interface SensorOptions {
   readonly cookies: Cookies;
   readonly inputs?:
     | Readonly<Record<string, string>>
-    | readonly InputField[]
+    | readonly (InputField | PreparedInput)[]
     | null;
   readonly actions?: readonly Action[] | null;
 }
@@ -63,7 +72,7 @@ export interface FwcimOptions {
   readonly timing: Readonly<Record<string, number>>;
   readonly inputs:
     | Readonly<Record<string, string>>
-    | readonly FwcimInput[]
+    | readonly (FwcimInput | PreparedFwcimInput)[]
     | null;
   readonly actions?: readonly FwcimAction[] | null;
   readonly cookies?: Cookies;
@@ -145,6 +154,7 @@ export class Nullgate {
   readonly #key: string;
   readonly #base: string;
   readonly #timeout: number;
+  readonly #fetch: typeof globalThis.fetch | undefined;
   constructor(
     apiKey: string | undefined = process.env.NULLGATE_API_KEY,
     options: ClientOptions = {},
@@ -174,6 +184,12 @@ export class Nullgate {
       throw new NullgateError(
         "invalid_request",
         "timeout must be positive seconds within the timer range",
+      );
+    this.#fetch = options.fetch ?? undefined;
+    if (this.#fetch !== undefined && typeof this.#fetch !== "function")
+      throw new NullgateError(
+        "invalid_request",
+        "fetch must be a native-fetch-compatible function",
       );
   }
   session(options: SessionOptions): Session {
@@ -208,19 +224,22 @@ export class Nullgate {
     const signal = AbortSignal.timeout(Math.ceil(this.#timeout));
     try {
       for (let attempt = 0; ; attempt++) {
-        const response = await fetch(`${this.#base}${path}`, {
-          method: body === undefined ? "GET" : "POST",
-          headers: {
-            Authorization: `Bearer ${this.#key}`,
-            ...(body === undefined
-              ? {}
-              : { "Content-Type": "application/json" }),
+        const response = await (this.#fetch ?? globalThis.fetch)(
+          `${this.#base}${path}`,
+          {
+            method: body === undefined ? "GET" : "POST",
+            headers: {
+              Authorization: `Bearer ${this.#key}`,
+              ...(body === undefined
+                ? {}
+                : { "Content-Type": "application/json" }),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            redirect: "manual",
+            credentials: "omit",
+            signal,
           },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          redirect: "manual",
-          credentials: "omit",
-          signal,
-        });
+        );
         let data: unknown;
         try {
           data = await response.json();
@@ -503,10 +522,10 @@ export class Page {
   #inputs(
     inputs:
       | Readonly<Record<string, string>>
-      | readonly InputField[]
+      | readonly (InputField | PreparedInput)[]
       | null
       | undefined,
-  ): InputField[] {
+  ): (InputField | PreparedInput)[] {
     return (
       Array.isArray(inputs)
         ? [...inputs]
@@ -514,7 +533,7 @@ export class Page {
             this.#document,
             inputs as Readonly<Record<string, string>> | null | undefined,
           )
-    ) as InputField[];
+    ) as (InputField | PreparedInput)[];
   }
   async sensor(options: SensorOptions): Promise<Request> {
     const scriptUrl = this.#script("sensor", options);
@@ -522,6 +541,8 @@ export class Page {
       documentFor(this.#document);
       const fields = this.#inputs(options.inputs);
       return fields.map((field) => {
+        if ("attributes" in field || typeof field.value === "object")
+          return validatePreparedInput(field);
         if (
           field.type?.trim().toLowerCase() === "password" ||
           [field.id, field.name].some((value) =>
