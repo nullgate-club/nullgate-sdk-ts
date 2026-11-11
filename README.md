@@ -4,7 +4,7 @@ Prepare target requests from observed pages. You send them with your own HTTP cl
 Requires Node.js 22.22 or newer.
 
 ```sh
-npm install @nullgate/sdk
+npm install github:nullgate-club/nullgate-sdk-ts
 export NULLGATE_API_KEY="your-key"
 ```
 
