@@ -5,6 +5,8 @@ import type { ThreatMetrix } from "./threatmetrix.js";
 export type Protection = AkamaiProtection | ThreatMetrix;
 
 export function httpURL(value: string, name: string): URL {
+  if (typeof value !== "string" || !/^https?:\/\//i.test(value))
+    throw new TypeError(`${name} must be an absolute HTTP(S) URL`);
   let url: URL;
   try {
     url = new URL(value);

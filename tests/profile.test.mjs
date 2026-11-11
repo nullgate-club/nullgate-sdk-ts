@@ -339,3 +339,31 @@ test("closing a live profile aborts pending target work", async (t) => {
   assert.equal(departures, 0);
   assert.equal(live.error, undefined);
 });
+
+for (const scriptUrl of [undefined, "/explicit-tags.js"]) {
+  test(`ThreatMetrix accepts module discovery and relative override ${scriptUrl}`, async (t) => {
+    const baseUrl = await serve(t, (socket, message) => {
+      if (message.type === "start") {
+        assert.equal(
+          message.tags_url,
+          scriptUrl === undefined
+            ? tags
+            : "https://shop.example/explicit-tags.js",
+        );
+        hello(socket);
+        socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+      } else if (message.type === "close") socket.close();
+    });
+    const document = new Nullgate("fake", { baseUrl })
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example/login",
+        `<script type="module" src="${tags}"></script>`,
+      );
+    const live = await document.threatmetrix({
+      send: async () => assert.fail("must not send"),
+      ...(scriptUrl === undefined ? {} : { scriptUrl }),
+    });
+    await live.close();
+  });
+}

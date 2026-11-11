@@ -96,7 +96,7 @@ export type InputValue = {
 
 /** Service event facts; input/change values are prepared summaries, never raw text. */
 export type Action = Readonly<Record<string, JsonValue>> & {
-  readonly type: string;
+  readonly type?: string;
   readonly value?: InputValue;
 };
 

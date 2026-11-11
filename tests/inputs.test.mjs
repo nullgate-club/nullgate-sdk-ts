@@ -67,19 +67,24 @@ for (const html of [
       calls++;
       throw new Error("must not send");
     });
-    const page = new Nullgate("fake")
-      .session({ userAgent: "browser" })
-      .page(
+    const session = new Nullgate("fake").session({ userAgent: "browser" });
+    const createPage = () =>
+      session.page(
         "https://shop.example",
         `<form id="login">${html}</form><script src="/sensor"></script>`,
       );
+    if (html.includes('value="secret"') || html.includes(">secret<")) {
+      assert.throws(createPage, { code: "invalid_page" });
+      return;
+    }
+    const page = createPage();
     await assert.rejects(
       page.sensor({
         script: "source",
         cookies: {},
         inputs: { secret: "private" },
       }),
-      { code: "invalid_request" },
+      { code: "invalid_inputs" },
     );
     await assert.rejects(
       page.fwcim({
@@ -87,7 +92,7 @@ for (const html of [
         timing: { navigationStart: 1 },
         inputs: { secret: "private" },
       }),
-      { code: "invalid_request" },
+      { code: "invalid_inputs" },
     );
     assert.equal(calls, 0);
   });

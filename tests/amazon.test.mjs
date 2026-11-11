@@ -84,7 +84,7 @@ for (const inputs of [
       .page("https://shop.example", html);
     await assert.rejects(
       page.fwcim({ form: "#signin", timing: { navigationStart: 1 }, inputs }),
-      { code: "invalid_request" },
+      { code: "invalid_inputs" },
     );
     assert.equal(sent, false);
   });

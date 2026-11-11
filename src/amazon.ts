@@ -11,7 +11,7 @@ import { Page } from "./models.js";
 
 /** FWCIM accepts event facts and local summaries, never an input value. */
 export interface FwcimAction {
-  readonly type: string;
+  readonly type?: string;
   readonly value?: never;
   readonly target?: number | null;
   readonly target_path?: string;
@@ -89,7 +89,7 @@ export interface FwcimInput {
   readonly name?: string;
   readonly selector?: string;
   readonly value?: string;
-  readonly geometry?: FwcimGeometry;
+  readonly geometry?: FwcimGeometry | null;
   /** Explicit opt-in to sending this same nonpassword value for canvas rendering. */
   readonly text?: string;
 }
@@ -99,7 +99,7 @@ export interface PreparedFwcimInput {
   readonly value: InputValue;
   readonly checksum: number;
   readonly selector?: string;
-  readonly geometry?: FwcimGeometry;
+  readonly geometry?: FwcimGeometry | null;
   readonly text?: string;
 }
 
@@ -175,7 +175,26 @@ export function documentFor(page: Page) {
     )
   )
     throw new TypeError("Page HTML must not contain password values");
+  for (const template of selectAll<AnyNode, Element>(
+    "template",
+    document.children,
+  ))
+    template.children = [];
   return document;
+}
+
+export function inputFields<T extends FwcimInput>(
+  page: Page,
+  inputs: Readonly<Record<string, string>> | readonly T[] | null | undefined,
+): (T | FwcimInput)[] {
+  if (Array.isArray(inputs)) return [...inputs];
+  const document = documentFor(page);
+  const elements = selectAll<AnyNode, Element>("*", document.children);
+  return Object.entries(inputs ?? {}).map(([key, value]) =>
+    elements.some((node) => node.attribs.id === key)
+      ? { id: key, value }
+      : { name: key, value },
+  );
 }
 
 /** Match the actual HTML control before handling any raw observation. */
@@ -198,15 +217,6 @@ function prepareDocumentInputs(
   );
   return inputs.map((input) => {
     if (
-      input.id &&
-      !input.name &&
-      !input.selector &&
-      !controls.some((node) => node.attribs.id === input.id)
-    ) {
-      const { id, ...rest } = input;
-      input = { ...rest, name: id };
-    }
-    if (
       Object.keys(input).some(
         (key) =>
           !["id", "name", "selector", "value", "geometry", "text"].includes(
@@ -218,7 +228,11 @@ function prepareDocumentInputs(
       )
     )
       throw new TypeError("Invalid FWCIM input observation");
-    if (!input.selector && !input.id && !input.name)
+    if (
+      input.selector === undefined &&
+      input.id === undefined &&
+      input.name === undefined
+    )
       throw new TypeError("FWCIM inputs require id, name, or selector");
     if (input.selector !== undefined && !input.selector.trim())
       throw new TypeError("Invalid FWCIM input selector");
@@ -228,8 +242,8 @@ function prepareDocumentInputs(
         ? selectAll<AnyNode, Element>(input.selector, document.children)
         : controls.filter(
             (node) =>
-              (!input.id || node.attribs.id === input.id) &&
-              (!input.name || node.attribs.name === input.name),
+              (input.id === undefined || node.attribs.id === input.id) &&
+              (input.name === undefined || node.attribs.name === input.name),
           );
     } catch {
       throw new TypeError("Invalid FWCIM input selector");
@@ -239,8 +253,8 @@ function prepareDocumentInputs(
       matches.length !== 1 ||
       node === undefined ||
       !["input", "textarea"].includes(node.name) ||
-      (input.id && node.attribs.id !== input.id) ||
-      (input.name && node.attribs.name !== input.name)
+      (input.id !== undefined && node.attribs.id !== input.id) ||
+      (input.name !== undefined && node.attribs.name !== input.name)
     )
       throw new TypeError(
         "FWCIM input must identify exactly one matching control",
@@ -258,7 +272,7 @@ function prepareDocumentInputs(
     const value = input.value ?? "";
     if (input.text !== undefined && input.text !== value)
       throw new TypeError("FWCIM canvas text must match the observed value");
-    if (input.geometry !== undefined) {
+    if (input.geometry != null) {
       const geometry = input.geometry;
       if (
         Object.keys(geometry).some(
@@ -290,7 +304,7 @@ function prepareDocumentInputs(
       checksum: checksum(value),
       ...(input.geometry === undefined
         ? {}
-        : { geometry: { ...input.geometry } }),
+        : { geometry: input.geometry === null ? null : { ...input.geometry } }),
       ...(input.text === undefined ? {} : { text: input.text }),
     };
   });
@@ -340,7 +354,7 @@ function prepareFwcimActions(
       action === null ||
       typeof action !== "object" ||
       Array.isArray(action) ||
-      typeof action.type !== "string"
+      (action.type !== undefined && typeof action.type !== "string")
     )
       throw new TypeError("Invalid FWCIM action");
     for (const [key, value] of Object.entries(action)) {
@@ -399,7 +413,7 @@ function prepareFwcimActions(
 
 export function prepareFwcim(
   page: Page,
-  formSelector: string,
+  formSelector: string | null,
   timing: Readonly<Record<string, number>>,
   inputs: readonly FwcimInput[],
   actions: readonly FwcimAction[],
@@ -407,26 +421,35 @@ export function prepareFwcim(
   const document = documentFor(page);
   if (
     !timing ||
-    !Number.isSafeInteger(timing.navigationStart) ||
+    !Number.isInteger(timing.navigationStart) ||
     (timing.navigationStart ?? 0) <= 0 ||
     Object.values(timing).some(
-      (value) => !Number.isSafeInteger(value) || value < 0,
+      (value) =>
+        !Number.isInteger(value) ||
+        value < 0 ||
+        (value !== 0 && value < (timing.navigationStart ?? 0)),
     )
   )
     throw new TypeError(
       "timing must contain observed navigationStart milliseconds",
     );
-  let matches: Element[];
-  try {
-    matches = selectAll<AnyNode, Element>(formSelector, document.children);
-  } catch {
-    throw new TypeError("Invalid form selector");
+  let form: Element | undefined;
+  if (formSelector !== null) {
+    let matches: Element[];
+    try {
+      if (!formSelector.trim()) throw new TypeError("Invalid form selector");
+      matches = selectAll<AnyNode, Element>(formSelector, document.children);
+    } catch {
+      throw new TypeError("Invalid form selector");
+    }
+    form = matches[0];
+    if (matches.length !== 1 || form?.name !== "form")
+      throw new TypeError("form must select exactly one form");
   }
-  const form = matches[0];
-  if (matches.length !== 1 || form?.name !== "form")
-    throw new TypeError("form must select exactly one form");
   return {
-    form_selector: formSelector,
+    ...(formSelector === null ? {} : { form_selector: formSelector }),
+    referrer: "",
+    submitted: true,
     performance_timing: { ...timing },
     inputs: prepareDocumentInputs(document, detached(inputs), form),
     actions: prepareFwcimActions(detached(actions)),

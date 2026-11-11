@@ -101,6 +101,57 @@ test("absent protections stay null and operations explain how to provide a URL",
     [null, null, null],
   );
   await assert.rejects(page.sensor({ script: "source", cookies: {} }), {
-    code: "missing_protection",
+    code: "protection_not_found",
   });
 });
+
+const explicitUrls = [
+  ["/sensor.js", "https://shop.example/sensor.js"],
+  ["../sensor.js?q=1#fragment", "https://shop.example/sensor.js?q=1#fragment"],
+  [
+    "https://cdn.example:443/sensor.js#fragment",
+    "https://cdn.example:443/sensor.js#fragment",
+  ],
+  ["//cdn.example/sensor.js", "https://cdn.example/sensor.js"],
+  ["", "https://shop.example/login"],
+  ["javascript:alert(1)", null],
+  ["https://user:password@cdn.example/sensor.js", null],
+  ["https://cdn.example:99999/sensor.js", null],
+  ["http:missing-authority", null],
+];
+for (const operation of /** @type {const} */ (["sensor", "pixel", "sbsd"])) {
+  for (const [scriptUrl, expected] of explicitUrls) {
+    test(`${operation} explicit URL ${JSON.stringify(scriptUrl)} matches Python resolution`, async (t) => {
+      let calls = 0;
+      /** @type {typeof fetch} */
+      const api = async (_url, init) => {
+        calls++;
+        assert.equal(JSON.parse(String(init?.body)).script_url, expected);
+        return Response.json({
+          request: {
+            url: "https://shop.example/target",
+            body: "payload",
+            headers: {},
+            send_at: 0,
+          },
+          session: "next",
+          request_id: "id",
+        });
+      };
+      t.mock.method(globalThis, "fetch", api);
+      const page = session.page(
+        "https://shop.example/login",
+        '<script>bazadebezolkohpepadr="123"</script>',
+      );
+      const pending = page[operation]({
+        script: "",
+        scriptUrl: String(scriptUrl),
+        cookies: {},
+      });
+      if (expected === null)
+        await assert.rejects(pending, { code: "invalid_url" });
+      else assert.equal((await pending).body, "payload");
+      assert.equal(calls, expected === null ? 0 : 1);
+    });
+  }
+}

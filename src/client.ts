@@ -1,15 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import {
-  type Action,
-  type InputField,
-  prepareActions,
-  prepareInputs,
-} from "./akamai.js";
+import { type Action, type InputField, prepareActions } from "./akamai.js";
 import {
   documentFor,
   type FwcimAction,
   type FwcimInput,
+  inputFields,
   prepareFwcim,
   prepareFwcimInputs,
 } from "./amazon.js";
@@ -30,8 +26,10 @@ export interface SessionOptions {
   readonly timezone?: string | null;
 }
 export type Cookies =
+  | null
   | Readonly<Record<string, string>>
   | ReadonlyMap<string, string>
+  | { readonly jar: Cookies }
   | { getCookiesSync(url: string): readonly { key: string; value: string }[] }
   | {
       getCookies(
@@ -56,12 +54,14 @@ export interface SbsdOptions extends PixelOptions {
   readonly cookies: Cookies;
 }
 export interface FwcimOptions {
-  readonly form: string;
+  readonly form: string | null;
   readonly timing: Readonly<Record<string, number>>;
-  readonly inputs: Readonly<Record<string, string>> | readonly FwcimInput[];
+  readonly inputs:
+    | Readonly<Record<string, string>>
+    | readonly FwcimInput[]
+    | null;
   readonly actions?: readonly FwcimAction[] | null;
   readonly cookies?: Cookies;
-  readonly scriptUrl?: string;
 }
 export interface ThreatMetrixOptions {
   readonly send: TargetFetch;
@@ -69,9 +69,9 @@ export interface ThreatMetrixOptions {
   readonly proxy?: string | null;
 }
 export interface UsageOptions {
-  readonly interval?: "hour" | "day";
-  readonly start?: string;
-  readonly end?: string;
+  readonly interval?: string;
+  readonly start?: string | Date | null;
+  readonly end?: string | Date | null;
 }
 export interface UsageTotal {
   readonly operation: string;
@@ -100,10 +100,17 @@ async function cookiesFor(
   names: readonly string[],
   url: string,
 ): Promise<Record<string, string>> {
-  if (source === undefined) return {};
-  if (source === null || typeof source !== "object" || Array.isArray(source))
+  if (!source) return {};
+  if (typeof source !== "object")
     throw new NullgateError(
-      "invalid_request",
+      "invalid_cookies",
+      "cookies must be a mapping or cookie jar",
+    );
+  if ("jar" in source && source.jar !== null && typeof source.jar === "object")
+    source = source.jar as Exclude<Cookies, null>;
+  if (Array.isArray(source) && source.length > 0)
+    throw new NullgateError(
+      "invalid_cookies",
       "cookies must be a mapping or cookie jar",
     );
   let entries: readonly (readonly [string, string])[];
@@ -123,14 +130,8 @@ async function cookiesFor(
   else entries = Object.entries(source) as [string, string][];
   const selected: Record<string, string> = {};
   for (const [name, value] of entries)
-    if (names.includes(name)) {
-      if (typeof value !== "string")
-        throw new NullgateError(
-          "invalid_request",
-          "Cookie values must be strings",
-        );
+    if (names.includes(name) && typeof value === "string")
       selected[name] = value;
-    }
   return selected;
 }
 
@@ -142,18 +143,19 @@ export class Nullgate {
     apiKey: string | undefined = process.env.NULLGATE_API_KEY,
     options: ClientOptions = {},
   ) {
-    if (typeof apiKey !== "string" || !apiKey || /[\r\n]/.test(apiKey))
+    if (typeof apiKey !== "string" || !apiKey.trim() || /[\r\n]/.test(apiKey))
       throw new NullgateError(
         "invalid_key",
         "Provide apiKey or NULLGATE_API_KEY",
       );
     this.#key = apiKey;
-    const base = local(() =>
-      httpURL(options.baseUrl ?? "https://api.nullgate.club", "baseUrl"),
+    const base = local(
+      () => httpURL(options.baseUrl ?? "https://api.nullgate.club", "baseUrl"),
+      "invalid_url",
     );
     if (base.username || base.password || base.search || base.hash)
       throw new NullgateError(
-        "invalid_request",
+        "invalid_url",
         "baseUrl cannot contain credentials, query, or fragment",
       );
     this.#base = base.href.replace(/\/+$/, "");
@@ -181,7 +183,13 @@ export class Nullgate {
     } as unknown as Account;
   }
   async usage(options: UsageOptions = {}): Promise<Usage> {
-    const query = new URLSearchParams(Object.entries(options));
+    const query = new URLSearchParams({ interval: options.interval ?? "hour" });
+    for (const [name, value] of Object.entries({
+      start: options.start,
+      end: options.end,
+    }))
+      if (value != null)
+        query.set(name, value instanceof Date ? value.toISOString() : value);
     return (await this._call(
       `/account/usage${query.size ? `?${query}` : ""}`,
     )) as unknown as Usage;
@@ -316,32 +324,32 @@ export class Session {
     if (
       !options ||
       typeof options.userAgent !== "string" ||
-      !options.userAgent ||
+      !options.userAgent.trim() ||
       /[\r\n]/.test(options.userAgent)
     )
       throw new NullgateError(
         "invalid_request",
         "userAgent must be a nonempty header value",
       );
-    const profile = options.profile ?? randomUUID();
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-        profile,
-      )
-    )
+    const rawProfile = String(options.profile ?? randomUUID())
+      .replace(/^urn:uuid:/, "")
+      .replace(/^\{+|\}+$/g, "")
+      .replaceAll("-", "");
+    if (!/^[0-9a-f]{32}$/i.test(rawProfile))
       throw new NullgateError("invalid_request", "profile must be a UUID");
-    if (options.timezone != null)
-      local(
-        () =>
-          new Intl.DateTimeFormat("en", {
-            timeZone: options.timezone ?? undefined,
-          }),
-      );
+    const profile = rawProfile
+      .toLowerCase()
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
     this.#client = client;
     this.#options = { ...options, profile };
   }
   page(url: string, html: string): Page {
-    return local(() => new Page(this, new Document(url, html)));
+    local(() => httpURL(url, "page URL"), "invalid_url");
+    return local(() => {
+      const document = new Document(url, html);
+      documentFor(document);
+      return new Page(this, document);
+    }, "invalid_page");
   }
   /** @internal */
   _run<T>(
@@ -410,10 +418,13 @@ export class Page {
   readonly #session: Session;
   readonly #document: Document;
   readonly #found: readonly Protection[];
+  readonly #pixelChallenges: readonly string[];
   constructor(session: Session, document: Document) {
     this.#session = session;
     this.#document = document;
-    this.#found = findProtections(document);
+    const discovery = findProtections(document);
+    this.#found = discovery.found;
+    this.#pixelChallenges = discovery.challenges;
   }
   get sensorUrl(): string | null {
     return this.#candidate("sensor")?.scriptURL ?? null;
@@ -424,12 +435,34 @@ export class Page {
   get sbsdUrl(): string | null {
     return this.#candidate("sbsd")?.scriptURL ?? null;
   }
-  #candidate(kind: string, explicit?: string): Protection | undefined {
-    const candidates = this.#found.filter(
-      (candidate) =>
-        candidate.kind === kind &&
-        (explicit === undefined || candidate.scriptURL === explicit),
-    );
+  #resolve(value: string): string {
+    return local(() => {
+      const resolved = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)
+        ? value
+        : value.startsWith("//")
+          ? new URL(this.#document.url).protocol + value
+          : new URL(value, this.#document.url).href;
+      httpURL(resolved, "scriptUrl");
+      return resolved;
+    }, "invalid_url");
+  }
+  #candidate(
+    kind: string,
+    explicit?: string,
+  ): { scriptURL: string; challenge?: string } | undefined {
+    const resolved =
+      explicit === undefined ? undefined : this.#resolve(explicit);
+    const candidates =
+      kind === "pixel" && resolved !== undefined
+        ? this.#pixelChallenges.map((challenge) => ({
+            scriptURL: resolved,
+            challenge,
+          }))
+        : this.#found.filter(
+            (candidate) =>
+              candidate.kind === kind &&
+              (resolved === undefined || candidate.scriptURL === resolved),
+          );
     const unique = [
       ...new Map(
         candidates.map((candidate) => [
@@ -443,6 +476,8 @@ export class Page {
         "ambiguous_protection",
         `Choose scriptUrl from: ${unique.map((candidate) => candidate.scriptURL).join(", ")}`,
       );
+    if (resolved !== undefined && kind !== "pixel")
+      return { scriptURL: resolved };
     return unique[0];
   }
   #script(kind: string, options: PixelOptions): string {
@@ -451,17 +486,11 @@ export class Page {
         "invalid_request",
         "Provide script source options",
       );
-    const url = options.scriptUrl ?? this.#candidate(kind)?.scriptURL;
+    const url = this.#candidate(kind, options.scriptUrl)?.scriptURL;
     if (url === undefined)
       throw new NullgateError(
-        "missing_protection",
+        "protection_not_found",
         `No ${kind} script found; provide scriptUrl`,
-      );
-    local(() => httpURL(url, "scriptUrl"));
-    if (typeof options.script !== "string" || !options.script)
-      throw new NullgateError(
-        "invalid_request",
-        "script must be nonempty source text",
       );
     return url;
   }
@@ -472,9 +501,14 @@ export class Page {
       | null
       | undefined,
   ): InputField[] {
-    return Array.isArray(inputs)
-      ? [...inputs]
-      : Object.entries(inputs ?? {}).map(([id, value]) => ({ id, value }));
+    return (
+      Array.isArray(inputs)
+        ? [...inputs]
+        : inputFields(
+            this.#document,
+            inputs as Readonly<Record<string, string>> | null | undefined,
+          )
+    ) as InputField[];
   }
   async sensor(options: SensorOptions): Promise<Request> {
     const scriptUrl = this.#script("sensor", options);
@@ -483,15 +517,30 @@ export class Page {
       const fields = this.#inputs(options.inputs);
       return fields.map((field) => {
         if (
-          field.type?.toLowerCase() === "password" ||
-          /^(?:password|ap_password)$/i.test(field.id ?? field.name ?? "") ||
-          /(?:current|new)-password/i.test(field.autocomplete ?? "")
+          field.type?.trim().toLowerCase() === "password" ||
+          [field.id, field.name].some((value) =>
+            ["password", "ap_password"].includes(
+              value?.trim().toLowerCase() ?? "",
+            ),
+          ) ||
+          (field.autocomplete ?? "")
+            .trim()
+            .toLowerCase()
+            .split(/\s+/)
+            .some((token) =>
+              ["current-password", "new-password"].includes(token),
+            )
         )
           throw new NullgateError(
-            "invalid_request",
+            "invalid_inputs",
             "Password observations are not allowed",
           );
-        if (field.id || field.name || field.selector) {
+        if (Object.values(field).some((value) => typeof value !== "string"))
+          throw new NullgateError(
+            "invalid_inputs",
+            "Input attributes must contain strings",
+          );
+        {
           const [observed] = prepareFwcimInputs(this.#document, [
             {
               ...(field.id === undefined ? {} : { id: field.id }),
@@ -504,7 +553,7 @@ export class Page {
           ]);
           if (observed === undefined)
             throw new NullgateError(
-              "invalid_request",
+              "invalid_inputs",
               "Missing input observation",
             );
           return {
@@ -515,7 +564,11 @@ export class Page {
                     !["id", "name", "value", "selector"].includes(name),
                 ),
               ),
-              ...observed.attributes,
+              ...Object.fromEntries(
+                Object.entries(field).filter(([name]) =>
+                  ["id", "name"].includes(name),
+                ),
+              ),
             },
             value: observed.value,
             ...(observed.selector === undefined
@@ -523,16 +576,12 @@ export class Page {
               : { selector: observed.selector }),
           };
         }
-        const [prepared] = prepareInputs([field]);
-        if (prepared === undefined)
-          throw new NullgateError(
-            "invalid_request",
-            "Missing input observation",
-          );
-        return prepared;
       });
-    });
-    const actions = local(() => prepareActions(options.actions ?? []));
+    }, "invalid_inputs");
+    const actions = local(
+      () => prepareActions(options.actions ?? []),
+      "invalid_actions",
+    );
     return this.#generate("sensor", {
       script_url: scriptUrl,
       script: options.script,
@@ -550,7 +599,7 @@ export class Page {
     const candidate = this.#candidate("pixel", scriptUrl);
     if (candidate === undefined || !("challenge" in candidate))
       throw new NullgateError(
-        "missing_protection",
+        "protection_not_found",
         "No pixel challenge found in HTML",
       );
     return this.#generate("pixel", {
@@ -580,19 +629,20 @@ export class Page {
     );
   }
   async fwcim(options: FwcimOptions): Promise<FwcimResult> {
-    const inputs = local(() =>
-      Array.isArray(options.inputs)
-        ? options.inputs
-        : Object.entries(options.inputs).map(([id, value]) => ({ id, value })),
+    const inputs = local(
+      () => inputFields(this.#document, options.inputs),
+      "invalid_inputs",
     );
-    const fields = local(() =>
-      prepareFwcim(
-        this.#document,
-        options.form,
-        options.timing,
-        inputs,
-        options.actions ?? [],
-      ),
+    const fields = local(
+      () =>
+        prepareFwcim(
+          this.#document,
+          options.form,
+          options.timing,
+          inputs,
+          options.actions ?? [],
+        ),
+      "invalid_inputs",
     );
     return this.#session._run(
       "amazon",
@@ -617,11 +667,10 @@ export class Page {
         "send must be a request callback",
       );
     local(() => documentFor(this.#document));
-    const scriptUrl =
-      options.scriptUrl ?? this.#candidate("profile")?.scriptURL;
+    const scriptUrl = this.#candidate("profile", options.scriptUrl)?.scriptURL;
     if (scriptUrl === undefined)
       throw new NullgateError(
-        "missing_protection",
+        "protection_not_found",
         "No ThreatMetrix tags script found; provide scriptUrl",
       );
     return this.#session._profile(this.#document, scriptUrl, options);

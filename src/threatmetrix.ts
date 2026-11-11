@@ -16,7 +16,7 @@ export function isThreatMetrixTagsURL(url: URL): boolean {
     url.pathname.endsWith("/tags.js") &&
     ["org_id", "session_id"].every((name) => {
       const values = url.searchParams.getAll(name);
-      return values.length === 1 && (values[0]?.trim().length ?? 0) > 0;
+      return values.length === 1 && (values[0]?.length ?? 0) > 0;
     })
   );
 }

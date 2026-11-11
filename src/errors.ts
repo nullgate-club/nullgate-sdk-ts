@@ -17,13 +17,13 @@ export class NullgateError extends Error {
   }
 }
 
-export function local<T>(action: () => T): T {
+export function local<T>(action: () => T, code = "invalid_request"): T {
   try {
     return action();
   } catch (error) {
     if (error instanceof NullgateError) throw error;
     throw new NullgateError(
-      "invalid_request",
+      code,
       error instanceof Error ? error.message : "Invalid input",
     );
   }

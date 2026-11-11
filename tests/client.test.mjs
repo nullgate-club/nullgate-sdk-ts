@@ -118,6 +118,8 @@ for (const operation of ["sensor", "pixel", "sbsd", "fwcim"]) {
             : {
                 form_selector: "#login",
                 performance_timing: { navigationStart: 1800000000000 },
+                referrer: "",
+                submitted: true,
                 inputs: [],
                 actions: [],
                 cookies: {},

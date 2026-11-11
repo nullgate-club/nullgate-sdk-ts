@@ -4,11 +4,14 @@ import { Page, type Protection, type ScriptReference } from "./models.js";
 import { isThreatMetrixTagsURL, ThreatMetrix } from "./threatmetrix.js";
 
 /** Discover observed classic scripts locally without fetching them. */
-export function findProtections(page: Page): Protection[] {
+export function findProtections(page: Page): {
+  found: Protection[];
+  challenges: string[];
+} {
   if (!(page instanceof Page)) throw new TypeError("Discovery requires a page");
   const document = new URL(page.url);
   let baseSource: string | undefined;
-  const sources: ScriptReference[] = [];
+  const sources: (ScriptReference & { classic: boolean })[] = [];
   const challenges = new Map<string, number>();
   const inert: string[] = [];
   let inline = false;
@@ -37,7 +40,11 @@ export function findProtections(page: Page): Protection[] {
           ["", "text/javascript", "application/javascript"].includes(
             scriptType,
           );
-        if (!inline) return;
+        if (
+          !inline &&
+          !(scriptType === "module" && !Object.hasOwn(attributes, "nomodule"))
+        )
+          return;
         const source = (attributes.src ?? "").trim();
         if (source) {
           let low = 0;
@@ -50,6 +57,7 @@ export function findProtections(page: Page): Protection[] {
           sources.push(
             Object.freeze({
               rawSource: source,
+              classic: inline,
               tagIndex: index,
               line: low + 1,
               column: parser.startIndex - (lineStarts[low] ?? 0),
@@ -94,7 +102,12 @@ export function findProtections(page: Page): Protection[] {
     } catch {
       continue;
     }
-    if (source.protocol !== "http:" && source.protocol !== "https:") continue;
+    if (
+      !["http:", "https:"].includes(source.protocol) ||
+      source.username ||
+      source.password
+    )
+      continue;
     source.hash = "";
     const scriptURL = source.href;
     const path = source.pathname.replace(/(?:%[0-9a-f]{2})+/gi, (encoded) =>
@@ -104,7 +117,7 @@ export function findProtections(page: Page): Protection[] {
       found.push(new ThreatMetrix(page, scriptURL, { provenance: reference }));
       continue;
     }
-    if (source.origin !== document.origin) continue;
+    if (!reference.classic || source.origin !== document.origin) continue;
     if (/^\/akam\/13\/[0-9a-fA-F]+$/.test(path)) {
       for (const [challenge, challengeOffset] of challenges) {
         found.push(
@@ -143,5 +156,5 @@ export function findProtections(page: Page): Protection[] {
       found.push(new Sensor(page, scriptURL, { provenance: reference }));
     }
   }
-  return found;
+  return { found, challenges: [...challenges.keys()] };
 }
