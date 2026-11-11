@@ -99,8 +99,6 @@ for (const operation of ["sensor", "pixel", "sbsd", "fwcim"]) {
             script_url: "https://shop.example/sensor",
             script: "source",
             cookies: { _abck: "observed", bm_sz: "size" },
-            inputs: [],
-            actions: [],
           }
         : operation === "pixel"
           ? {
@@ -121,7 +119,6 @@ for (const operation of ["sensor", "pixel", "sbsd", "fwcim"]) {
                 referrer: "",
                 submitted: true,
                 inputs: [],
-                actions: [],
                 cookies: {},
               };
     assert.deepEqual(actual, { ...common, ...expected });
@@ -432,5 +429,202 @@ for (const failure of ["http", "transport"]) {
       status: failure === "http" ? 400 : null,
       requestId: failure === "http" ? "failed" : null,
     });
+  });
+}
+
+for (const operation of ["sensor", "fwcim"]) {
+  for (const { observations, expected } of [
+    { observations: {}, expected: {} },
+    { observations: { inputs: null, actions: null }, expected: {} },
+    {
+      observations: { inputs: [], actions: [] },
+      expected: { inputs: [], actions: [] },
+    },
+    { observations: { inputs: [], actions: null }, expected: { inputs: [] } },
+    { observations: { inputs: null, actions: [] }, expected: { actions: [] } },
+  ]) {
+    test(`${operation} preserves observation omission ${JSON.stringify(observations)}`, async () => {
+      const client = new Nullgate("fake", {
+        fetch: async (_url, init) => {
+          const body = JSON.parse(String(init?.body));
+          assert.deepEqual(
+            Object.fromEntries(
+              Object.entries(body).filter(([key]) =>
+                ["inputs", "actions"].includes(key),
+              ),
+            ),
+            expected,
+          );
+          return Response.json(
+            operation === "fwcim"
+              ? wire.amazon.components.schemas.Generated.examples[0]
+              : wire.akamai.paths["/akamai/sensor"].post.responses["200"]
+                  .content["application/json"].example,
+          );
+        },
+      });
+      const page = client.session({ userAgent: "browser" }).page(url, html);
+      if (operation === "sensor")
+        await page.sensor({ script: "source", cookies: {}, ...observations });
+      else
+        await page.fwcim({ timing: { navigationStart: 1 }, ...observations });
+    });
+  }
+}
+
+for (const options of [
+  {},
+  { documentId: "00000000-0000-0000-0000-00000000004a" },
+  { startedAtMs: 0 },
+  {
+    documentId: "urn:uuid:00000000-0000-0000-0000-00000000004A",
+    startedAtMs: 1000,
+  },
+  { documentId: null, startedAtMs: null },
+]) {
+  test(`page identity preserves caller facts and stable defaults ${JSON.stringify(options)}`, async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: 2000 });
+    /** @type {Record<string, any>[]} */ const bodies = [];
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json(
+          wire.akamai.paths["/akamai/sensor"].post.responses["200"].content[
+            "application/json"
+          ].example,
+        );
+      },
+    });
+    const page = client
+      .session({ userAgent: "browser" })
+      .page(url, html, options);
+    await page.sensor({ script: "source", cookies: {} });
+    await page.sensor({ script: "source", cookies: {} });
+    assert.equal(bodies[0]?.started_at_ms, options.startedAtMs ?? 2000);
+    assert.match(
+      bodies[0]?.document_id,
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+    );
+    if (options.documentId != null)
+      assert.equal(
+        bodies[0]?.document_id,
+        "00000000-0000-0000-0000-00000000004a",
+      );
+    assert.equal(bodies[1]?.document_id, bodies[0]?.document_id);
+    assert.equal(bodies[1]?.started_at_ms, bodies[0]?.started_at_ms);
+  });
+}
+for (const options of [
+  { documentId: "invalid" },
+  { startedAtMs: -1 },
+  { startedAtMs: 1.5 },
+  { startedAtMs: true },
+]) {
+  test(`invalid caller page identity fails locally ${JSON.stringify(options)}`, () => {
+    assert.throws(
+      () =>
+        new Nullgate("fake")
+          .session({ userAgent: "browser" })
+          .page(url, html, /** @type {any} */ (options)),
+      { code: "invalid_page" },
+    );
+  });
+}
+
+for (const { markup, options, expectedUrl, expectedChallenge } of [
+  {
+    markup: '<script src="/akam/13/abc"></script>',
+    options: { challenge: "00123" },
+    expectedUrl: "https://shop.example/akam/13/abc",
+    expectedChallenge: "00123",
+  },
+  {
+    markup:
+      '<script>bazadebezolkohpepadr="1";bazadebezolkohpepadr="2"</script><script src="/akam/13/abc"></script>',
+    options: { challenge: "٣" },
+    expectedUrl: "https://shop.example/akam/13/abc",
+    expectedChallenge: "٣",
+  },
+  {
+    markup: "",
+    options: { challenge: "0", scriptUrl: "/observed.js?opaque=%2f" },
+    expectedUrl: "https://shop.example/observed.js?opaque=%2f",
+    expectedChallenge: "0",
+  },
+  {
+    markup: html,
+    options: { challenge: null },
+    expectedUrl: "https://shop.example/akam/13/abc",
+    expectedChallenge: "123",
+  },
+]) {
+  test(`pixel sends the observed explicit or discovered challenge ${JSON.stringify(options)}`, async () => {
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        assert.equal(body.challenge, expectedChallenge);
+        assert.equal(body.script_url, expectedUrl);
+        assert.equal(Object.hasOwn(body, "challenge_offset"), false);
+        return Response.json(
+          wire.akamai.paths["/akamai/pixel"].post.responses["200"].content[
+            "application/json"
+          ].example,
+        );
+      },
+    });
+    await client
+      .session({ userAgent: "browser" })
+      .page(url, markup)
+      .pixel({ script: "source", ...options });
+  });
+}
+for (const challenge of ["", "-1", "1.5", 1]) {
+  test(`pixel rejects a nondecimal explicit challenge ${JSON.stringify(challenge)}`, async () => {
+    const page = new Nullgate("fake", {
+      fetch: async () => assert.fail("must not send"),
+    })
+      .session({ userAgent: "browser" })
+      .page(url, html);
+    await assert.rejects(
+      page.pixel({
+        script: "source",
+        challenge: /** @type {any} */ (challenge),
+      }),
+      { code: "invalid_request" },
+    );
+  });
+}
+test("explicit pixel challenge still requires a unique script URL", async () => {
+  const page = new Nullgate("fake", {
+    fetch: async () => assert.fail("must not send"),
+  })
+    .session({ userAgent: "browser" })
+    .page(
+      url,
+      '<script src="/akam/13/abc"></script><script src="/akam/13/def"></script>',
+    );
+  await assert.rejects(page.pixel({ script: "source", challenge: "1" }), {
+    code: "ambiguous_protection",
+  });
+});
+for (const token of ["", "&t=", "&t=observed%2Btoken"]) {
+  test(`SBSD retains URL-derived blocking without inventing a field ${token}`, async () => {
+    const scriptUrl = `https://shop.example/probe?v=${profile}${token}`;
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        assert.equal(body.script_url, scriptUrl);
+        assert.equal(Object.hasOwn(body, "blocking"), false);
+        return Response.json(
+          wire.akamai.paths["/akamai/sbsd"].post.responses["200"].content[
+            "application/json"
+          ].example,
+        );
+      },
+    });
+    await client
+      .session({ userAgent: "browser" })
+      .page(url, "")
+      .sbsd({ script: "source", scriptUrl, cookies: {} });
   });
 }

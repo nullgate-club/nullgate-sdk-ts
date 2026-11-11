@@ -7,6 +7,7 @@ import { isThreatMetrixTagsURL, ThreatMetrix } from "./threatmetrix.js";
 export function findProtections(page: Page): {
   found: Protection[];
   challenges: string[];
+  pixelUrls: string[];
 } {
   if (!(page instanceof Page)) throw new TypeError("Discovery requires a page");
   const document = new URL(page.url);
@@ -95,6 +96,7 @@ export function findProtections(page: Page): {
     // A malformed or non-HTTP base does not invalidate the caller's document.
   }
   const found: Protection[] = [];
+  const pixelUrls: string[] = [];
   for (const reference of sources) {
     let source: URL;
     try {
@@ -119,6 +121,7 @@ export function findProtections(page: Page): {
     }
     if (!reference.classic || source.origin !== document.origin) continue;
     if (/^\/akam\/13\/[0-9a-fA-F]+$/.test(path)) {
+      pixelUrls.push(scriptURL);
       for (const [challenge, challengeOffset] of challenges) {
         found.push(
           new Pixel(page, scriptURL, challenge, {
@@ -156,5 +159,5 @@ export function findProtections(page: Page): {
       found.push(new Sensor(page, scriptURL, { provenance: reference }));
     }
   }
-  return { found, challenges: [...challenges.keys()] };
+  return { found, challenges: [...challenges.keys()], pixelUrls };
 }

@@ -30,6 +30,7 @@ export {
   type UsageOptions,
 } from "./client.js";
 export { NullgateError } from "./errors.js";
+export type { PageOptions } from "./models.js";
 export type { PagehideOptions, Profile } from "./profile.js";
 export type { FwcimResult, Request } from "./solution.js";
 export type {

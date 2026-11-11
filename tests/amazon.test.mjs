@@ -162,3 +162,115 @@ for (const [
     );
   });
 }
+
+for (const { options, expected } of [
+  { options: {}, expected: { submitted: true, referrer: "" } },
+  {
+    options: { form: null, historyLength: null },
+    expected: { submitted: true, referrer: "" },
+  },
+  {
+    options: {
+      form: "#signin",
+      submitted: false,
+      referrer: "https://shop.example/previous",
+      historyLength: 1,
+    },
+    expected: {
+      form_selector: "#signin",
+      submitted: false,
+      referrer: "https://shop.example/previous",
+      history_length: 1,
+    },
+  },
+]) {
+  test(`Amazon preserves optional form/context facts ${JSON.stringify(options)}`, async () => {
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        assert.deepEqual(
+          Object.fromEntries(
+            Object.entries(body).filter(([key]) =>
+              [
+                "form_selector",
+                "submitted",
+                "referrer",
+                "history_length",
+              ].includes(key),
+            ),
+          ),
+          expected,
+        );
+        return Response.json({
+          metadata1: "opaque",
+          headers: {},
+          send_at: 0,
+          session: "next",
+          request_id: "id",
+        });
+      },
+    });
+    await client
+      .session({ userAgent: "browser" })
+      .page("https://shop.example", html)
+      .fwcim({ timing: { navigationStart: 1 }, ...options });
+  });
+}
+for (const options of [
+  { submitted: null },
+  { submitted: 0 },
+  { referrer: null },
+  { referrer: 1 },
+  { historyLength: 0 },
+  { historyLength: 1.5 },
+  { form: "" },
+  { form: "#missing" },
+]) {
+  test(`Amazon rejects invalid form/context facts ${JSON.stringify(options)}`, async () => {
+    const page = new Nullgate("fake", {
+      fetch: async () => assert.fail("must not send"),
+    })
+      .session({ userAgent: "browser" })
+      .page("https://shop.example", html);
+    await assert.rejects(
+      page.fwcim(
+        /** @type {any} */ ({ timing: { navigationStart: 1 }, ...options }),
+      ),
+      { code: "invalid_inputs" },
+    );
+  });
+}
+for (const { options, navigationStart, accepted } of [
+  { options: {}, navigationStart: 1000, accepted: true },
+  { options: { startedAtMs: 1000 }, navigationStart: 1000, accepted: true },
+  { options: { startedAtMs: 1000 }, navigationStart: 1001, accepted: false },
+]) {
+  test(`Amazon respects an explicit page start ${JSON.stringify(options)} ${navigationStart}`, async () => {
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        assert.equal(
+          accepted,
+          true,
+          "mismatched clocks must not reach the API",
+        );
+        assert.equal(
+          JSON.parse(String(init?.body)).started_at_ms,
+          navigationStart,
+        );
+        return Response.json({
+          metadata1: "opaque",
+          headers: {},
+          send_at: 0,
+          session: "next",
+          request_id: "id",
+        });
+      },
+    });
+    const page = client
+      .session({ userAgent: "browser" })
+      .page("https://shop.example", html, options);
+    const pending = page.fwcim({ timing: { navigationStart } });
+    if (accepted) assert.equal((await pending).metadata1, "opaque");
+    else await assert.rejects(pending, { code: "invalid_inputs" });
+  });
+}

@@ -26,8 +26,8 @@ export function httpURL(value: string, name: string): URL {
 
 export interface PageOptions {
   /** Caller-observed navigation start; defaults to the time of construction. */
-  readonly startedAtMs?: number;
-  readonly documentId?: string;
+  readonly startedAtMs?: number | null;
+  readonly documentId?: string | null;
 }
 
 /** Caller-owned document. Discovery never fetches or executes its contents. */
@@ -42,20 +42,24 @@ export class Page {
     if (typeof html !== "string")
       throw new TypeError("Page.html must be a string");
     if (
-      options.startedAtMs !== undefined &&
-      (!Number.isSafeInteger(options.startedAtMs) || options.startedAtMs < 0)
+      options.startedAtMs != null &&
+      (!Number.isInteger(options.startedAtMs) || options.startedAtMs < 0)
     )
       throw new TypeError("Page.startedAtMs must be a nonnegative integer");
-    if (
-      options.documentId !== undefined &&
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-        options.documentId,
-      )
-    )
+    let documentId = options.documentId ?? randomUUID();
+    if (typeof documentId !== "string")
+      throw new TypeError("Page.documentId must be a UUID");
+    documentId = documentId
+      .replace(/^urn:uuid:/, "")
+      .replace(/^\{+|\}+$/g, "")
+      .replaceAll("-", "");
+    if (!/^[0-9a-f]{32}$/i.test(documentId))
       throw new TypeError("Page.documentId must be a UUID");
     this.url = url;
     this.html = html;
-    this.documentId = options.documentId ?? randomUUID();
+    this.documentId = documentId
+      .toLowerCase()
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
     this.startedAtMs = options.startedAtMs ?? Date.now();
     Object.freeze(this);
   }

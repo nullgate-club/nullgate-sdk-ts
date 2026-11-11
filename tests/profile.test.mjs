@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
@@ -510,4 +511,124 @@ test("null collector selects the tags entry instead", async (t) => {
     collector: null,
   });
   await live.close();
+});
+
+const emailSummary = {
+  attributes: { id: "email" },
+  value: {
+    length: 3,
+    hash: createHash("sha256").update("abc", "utf16le").digest("hex"),
+    counts: [3, 0, 3, 0],
+    hash31: 96354,
+    trimmed_hash31: 96354,
+    trimmed_length: 3,
+  },
+};
+const passwordSummary = {
+  attributes: { id: "secret" },
+  value: { length: 0, hash: "0".repeat(64) },
+};
+for (const { observations, expected } of [
+  { observations: {}, expected: {} },
+  { observations: { inputs: null, actions: null }, expected: {} },
+  {
+    observations: { inputs: [], actions: [] },
+    expected: { inputs: [], actions: [] },
+  },
+  {
+    observations: {
+      inputs: [{ id: "email", value: "abc" }],
+      actions: [{ type: "mousemove", x: 1, y: 2 }],
+    },
+    expected: {
+      inputs: [emailSummary],
+      actions: [{ type: "mousemove", x: 1, y: 2 }],
+    },
+  },
+  {
+    observations: { inputs: [passwordSummary] },
+    expected: { inputs: [passwordSummary] },
+  },
+]) {
+  test(`ThreatMetrix start preserves observation facts ${JSON.stringify(observations)}`, async (t) => {
+    const baseUrl = await serve(t, (socket, message) => {
+      if (message.type === "start") {
+        assert.deepEqual(
+          Object.fromEntries(
+            Object.entries(message).filter(([key]) =>
+              ["inputs", "actions"].includes(key),
+            ),
+          ),
+          expected,
+        );
+        assert.equal(message.document_id, profileId);
+        assert.equal(message.started_at_ms, 1);
+        hello(socket);
+        socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+      } else if (message.type === "close") socket.close();
+    });
+    const document = new Nullgate("fake", { baseUrl })
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example",
+        `<input id="email"><input id="secret" type="password"><script src="${tags}"></script>`,
+        { documentId: profileId, startedAtMs: 1 },
+      );
+    const live = await document.threatmetrix({
+      send: async () => assert.fail("must not send"),
+      ...observations,
+    });
+    await live.close();
+  });
+}
+for (const observations of [
+  { inputs: [{ id: "secret", value: "private" }] },
+  { actions: [{ type: "input", value: "private" }] },
+]) {
+  test(`ThreatMetrix refuses raw password or action text before startup ${JSON.stringify(observations)}`, async (t) => {
+    const baseUrl = await serve(t, () => assert.fail("must not start"));
+    const document = new Nullgate("fake", { baseUrl })
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example",
+        `<input id="secret" type="password"><script src="${tags}"></script>`,
+      );
+    await assert.rejects(
+      document.threatmetrix({
+        send: async () => assert.fail("must not send"),
+        .../** @type {any} */ (observations),
+      }),
+      { code: "inputs" in observations ? "invalid_inputs" : "invalid_actions" },
+    );
+  });
+}
+test("profile reports its request ID after close without API credentials", async (t) => {
+  const baseUrl = await serve(t, (socket, message) => {
+    if (message.type === "start") {
+      hello(socket);
+      socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+    } else if (message.type === "close") socket.close();
+  });
+  let reports = 0;
+  const client = new Nullgate("private-key", {
+    baseUrl,
+    fetch: async (input, init) => {
+      reports++;
+      assert.equal(String(input), `${baseUrl}/analytics/report`);
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        request_id: requestId,
+      });
+      assert.deepEqual(
+        [...new Headers(init?.headers)],
+        [["content-type", "application/json"]],
+      );
+      return Response.json({ ok: true });
+    },
+  });
+  const live = await page(client).threatmetrix({
+    send: async () => assert.fail("must not send"),
+  });
+  await live.close();
+  assert.equal(await live.report(), true);
+  assert.equal(reports, 1);
 });

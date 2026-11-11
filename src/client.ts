@@ -18,9 +18,20 @@ import {
 } from "./amazon.js";
 import { findProtections } from "./discovery.js";
 import { local, NullgateError, retryDelay } from "./errors.js";
-import { Page as Document, httpURL, type Protection } from "./models.js";
+import {
+  Page as Document,
+  httpURL,
+  type PageOptions,
+  type Protection,
+} from "./models.js";
 import { Profile } from "./profile.js";
-import { FwcimResult, Request, resultData } from "./solution.js";
+import {
+  FwcimResult,
+  type OperationOptions,
+  type Reporter,
+  Request,
+  resultData,
+} from "./solution.js";
 import {
   type Collector,
   prepareCollector,
@@ -63,25 +74,33 @@ export interface SensorOptions {
 export interface PixelOptions {
   readonly script: string;
   readonly scriptUrl?: string;
+  readonly challenge?: string | null;
 }
-export interface SbsdOptions extends PixelOptions {
+export interface SbsdOptions {
+  readonly script: string;
+  readonly scriptUrl?: string;
   readonly cookies: Cookies;
 }
 export interface FwcimOptions {
-  readonly form: string | null;
+  readonly form?: string | null;
   readonly timing: Readonly<Record<string, number>>;
-  readonly inputs:
+  readonly inputs?:
     | Readonly<Record<string, string>>
     | readonly (FwcimInput | PreparedFwcimInput)[]
     | null;
   readonly actions?: readonly FwcimAction[] | null;
   readonly cookies?: Cookies;
+  readonly submitted?: boolean;
+  readonly referrer?: string;
+  readonly historyLength?: number | null;
 }
 export interface ThreatMetrixOptions {
   readonly send: TargetFetch;
   readonly scriptUrl?: string | null;
   readonly collector?: Collector | null;
   readonly proxy?: string | null;
+  readonly inputs?: SensorOptions["inputs"];
+  readonly actions?: readonly Action[] | null;
 }
 export interface UsageOptions {
   readonly interval?: string;
@@ -150,11 +169,35 @@ async function cookiesFor(
   return selected;
 }
 
+// Keep best-effort reports from hiding caller programming errors.
+function networkFailure(error: unknown): boolean {
+  const cause =
+    error instanceof TypeError && error.cause !== undefined
+      ? error.cause
+      : error;
+  if (cause instanceof AggregateError)
+    return cause.errors.length > 0 && cause.errors.every(networkFailure);
+  if (cause instanceof DOMException && cause.name === "NetworkError")
+    return true;
+  if (
+    cause === null ||
+    typeof cause !== "object" ||
+    !("code" in cause) ||
+    typeof cause.code !== "string"
+  )
+    return false;
+  return /^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|SOCKET|DESTROYED|CLOSED|HEADERS_OVERFLOW|RES_CONTENT_LENGTH_MISMATCH|TRAILER_MISMATCH)|HPE_[A-Z_]+|Z_DATA_ERROR|Z_BUF_ERROR|CERT_[A-Z_]+|ERR_TLS_[A-Z_]+|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)$/.test(
+    cause.code,
+  );
+}
+
 export class Nullgate {
   readonly #key: string;
   readonly #base: string;
   readonly #timeout: number;
   readonly #fetch: typeof globalThis.fetch | undefined;
+  /** @internal */
+  readonly _reporter: Reporter;
   constructor(
     apiKey: string | undefined = process.env.NULLGATE_API_KEY,
     options: ClientOptions = {},
@@ -191,6 +234,7 @@ export class Nullgate {
         "invalid_request",
         "fetch must be a native-fetch-compatible function",
       );
+    this._reporter = this.report.bind(this);
   }
   session(options: SessionOptions): Session {
     return new Session(this, options);
@@ -215,6 +259,42 @@ export class Nullgate {
     return (await this._call(
       `/account/usage${query.size ? `?${query}` : ""}`,
     )) as unknown as Usage;
+  }
+  /** True means HTTP delivery, not target acceptance or a refund. */
+  async report(
+    requestId: string,
+    options: OperationOptions = {},
+  ): Promise<boolean> {
+    if (typeof requestId !== "string" || !requestId)
+      throw new NullgateError(
+        "invalid_request",
+        "requestId must be a nonempty string",
+      );
+    options.signal?.throwIfAborted();
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(Math.ceil(Math.min(3000, this.#timeout))),
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    try {
+      const response = await (this.#fetch ?? globalThis.fetch)(
+        `${this.#base}/analytics/report`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ request_id: requestId }),
+          redirect: "manual",
+          credentials: "omit",
+          signal,
+        },
+      );
+      await response.arrayBuffer();
+      options.signal?.throwIfAborted();
+      return !signal.aborted && response.ok;
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (signal.aborted || networkFailure(error)) return false;
+      throw error;
+    }
   }
   /** @internal */
   async _call(
@@ -318,6 +398,7 @@ export class Nullgate {
         signal: new AbortController().signal,
         timeoutMs: Math.max(1, this.#timeout - (Date.now() - started)),
         rotateState,
+        reporter: this._reporter,
       });
       try {
         await profile._waitForReady();
@@ -368,12 +449,12 @@ export class Session {
     this.#client = client;
     this.#options = { ...options, profile };
   }
-  page(url: string, html: string): Page {
+  page(url: string, html: string, options: PageOptions = {}): Page {
     local(() => httpURL(url, "page URL"), "invalid_url");
     return local(() => {
-      const document = new Document(url, html);
+      const document = new Document(url, html, options);
       documentFor(document);
-      return new Page(this, document);
+      return new Page(this, document, options.startedAtMs != null);
     }, "invalid_page");
   }
   /** @internal */
@@ -381,7 +462,7 @@ export class Session {
     product: string,
     document: Document,
     fields: Record<string, unknown>,
-    finish: (data: Record<string, unknown>) => T,
+    finish: (data: Record<string, unknown>, reporter: Reporter) => T,
   ): Promise<T> {
     const pending = (this.#pending.get(product) ?? Promise.resolve())
       .catch(() => undefined)
@@ -395,7 +476,7 @@ export class Session {
             ),
           },
         );
-        const result = finish(data);
+        const result = finish(data, this.#client._reporter);
         if (typeof data.session !== "string" || !data.session)
           throw new NullgateError("protocol_error", "Missing response session");
         this.#states.set(product, data.session);
@@ -444,12 +525,16 @@ export class Page {
   readonly #document: Document;
   readonly #found: readonly Protection[];
   readonly #pixelChallenges: readonly string[];
-  constructor(session: Session, document: Document) {
+  readonly #pixelUrls: readonly string[];
+  readonly #explicitStartedAt: boolean;
+  constructor(session: Session, document: Document, explicitStartedAt = false) {
+    this.#explicitStartedAt = explicitStartedAt;
     this.#session = session;
     this.#document = document;
     const discovery = findProtections(document);
     this.#found = discovery.found;
     this.#pixelChallenges = discovery.challenges;
+    this.#pixelUrls = discovery.pixelUrls;
   }
   get sensorUrl(): string | null {
     return this.#candidate("sensor")?.scriptURL ?? null;
@@ -535,11 +620,10 @@ export class Page {
           )
     ) as (InputField | PreparedInput)[];
   }
-  async sensor(options: SensorOptions): Promise<Request> {
-    const scriptUrl = this.#script("sensor", options);
-    const inputs = local(() => {
+  #prepareInputs(inputs: SensorOptions["inputs"]): PreparedInput[] {
+    return local(() => {
       documentFor(this.#document);
-      const fields = this.#inputs(options.inputs);
+      const fields = this.#inputs(inputs);
       return fields.map((field) => {
         if ("attributes" in field || typeof field.value === "object")
           return validatePreparedInput(field);
@@ -605,10 +689,15 @@ export class Page {
         }
       });
     }, "invalid_inputs");
-    const actions = local(
-      () => prepareActions(options.actions ?? []),
-      "invalid_actions",
-    );
+  }
+  async sensor(options: SensorOptions): Promise<Request> {
+    const scriptUrl = this.#script("sensor", options);
+    const inputs =
+      options.inputs == null ? undefined : this.#prepareInputs(options.inputs);
+    const actions =
+      options.actions == null
+        ? undefined
+        : local(() => prepareActions(options.actions ?? []), "invalid_actions");
     return this.#generate("sensor", {
       script_url: scriptUrl,
       script: options.script,
@@ -617,11 +706,40 @@ export class Page {
         ["_abck", "bm_sz"],
         this.#document.url,
       ),
-      inputs,
-      actions,
+      ...(inputs === undefined ? {} : { inputs }),
+      ...(actions === undefined ? {} : { actions }),
     });
   }
   async pixel(options: PixelOptions): Promise<Request> {
+    if (options.challenge != null) {
+      if (
+        typeof options.challenge !== "string" ||
+        !/^\p{Decimal_Number}+$/u.test(options.challenge)
+      )
+        throw new NullgateError(
+          "invalid_request",
+          "challenge must be a nonempty decimal string",
+        );
+      const urls =
+        options.scriptUrl === undefined
+          ? [...new Set(this.#pixelUrls)]
+          : [this.#resolve(options.scriptUrl)];
+      if (urls.length > 1)
+        throw new NullgateError(
+          "ambiguous_protection",
+          `Choose scriptUrl from: ${urls.join(", ")}`,
+        );
+      if (urls[0] === undefined)
+        throw new NullgateError(
+          "protection_not_found",
+          "No pixel script found; provide scriptUrl",
+        );
+      return this.#generate("pixel", {
+        script_url: urls[0],
+        script: options.script,
+        challenge: options.challenge,
+      });
+    }
     const scriptUrl = this.#script("pixel", options);
     const candidate = this.#candidate("pixel", scriptUrl);
     if (candidate === undefined || !("challenge" in candidate))
@@ -656,25 +774,35 @@ export class Page {
       "akamai",
       this.#document,
       { operation, ...fields },
-      (data) => new Request(resultData(data, this.#document.url)),
+      (data, reporter) =>
+        new Request(resultData(data, this.#document.url), reporter),
     );
   }
   async fwcim(options: FwcimOptions): Promise<FwcimResult> {
     const inputs = local(
-      () => inputFields(this.#document, options.inputs),
-      "invalid_inputs",
-    );
-    const fields = local(
       () =>
-        prepareFwcim(
-          this.#document,
-          options.form,
-          options.timing,
-          inputs,
-          options.actions ?? [],
-        ),
+        options.inputs == null
+          ? null
+          : inputFields(this.#document, options.inputs),
       "invalid_inputs",
     );
+    const fields = local(() => {
+      if (
+        this.#explicitStartedAt &&
+        options.timing?.navigationStart !== this.#document.startedAtMs
+      )
+        throw new TypeError(
+          "timing.navigationStart must match the explicit page start",
+        );
+      return prepareFwcim(
+        this.#document,
+        options.form ?? null,
+        options.timing,
+        inputs,
+        options.actions,
+        options,
+      );
+    }, "invalid_inputs");
     return this.#session._run(
       "amazon",
       this.#document,
@@ -688,7 +816,8 @@ export class Page {
           this.#document.url,
         ),
       },
-      (data) => new FwcimResult(resultData(data, this.#document.url, true)),
+      (data, reporter) =>
+        new FwcimResult(resultData(data, this.#document.url, true), reporter),
     );
   }
   async threatmetrix(options: ThreatMetrixOptions): Promise<Profile> {
@@ -698,6 +827,19 @@ export class Page {
         "send must be a request callback",
       );
     local(() => documentFor(this.#document));
+    const observations = {
+      ...(options.inputs == null
+        ? {}
+        : { inputs: this.#prepareInputs(options.inputs) }),
+      ...(options.actions == null
+        ? {}
+        : {
+            actions: local(
+              () => prepareActions(options.actions ?? []),
+              "invalid_actions",
+            ),
+          }),
+    };
     if (options.collector != null) {
       if (options.scriptUrl != null)
         throw new NullgateError(
@@ -706,7 +848,7 @@ export class Page {
         );
       return this.#session._profile(
         this.#document,
-        { collector: prepareCollector(options.collector) },
+        { collector: prepareCollector(options.collector), ...observations },
         options,
       );
     }
@@ -721,7 +863,7 @@ export class Page {
       );
     return this.#session._profile(
       this.#document,
-      { tags_url: scriptUrl },
+      { tags_url: scriptUrl, ...observations },
       options,
     );
   }

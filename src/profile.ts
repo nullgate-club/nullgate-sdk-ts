@@ -1,7 +1,7 @@
 import WebSocket, { type RawData } from "ws";
 import { transportCause } from "./error-info.js";
 import { NullgateError, retryDelay } from "./errors.js";
-import type { OperationOptions } from "./solution.js";
+import type { OperationOptions, Reporter } from "./solution.js";
 import {
   Target,
   type TargetRequest,
@@ -22,6 +22,7 @@ interface ProfileConnection {
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
   readonly rotateState: (stateId: string) => void;
+  readonly reporter: Reporter;
 }
 
 interface IceOperation {
@@ -74,6 +75,7 @@ export class Profile {
   readonly #target: Target;
   readonly #signal: AbortSignal;
   readonly #timeoutMs: number;
+  readonly #reporter: Reporter;
   readonly #operations = new AbortController();
   readonly #ready = Promise.withResolvers<void>();
   readonly #collected = Promise.withResolvers<void>();
@@ -98,6 +100,7 @@ export class Profile {
     this.#target = connection.target;
     this.#signal = connection.signal;
     this.#timeoutMs = connection.timeoutMs;
+    this.#reporter = connection.reporter;
     this.#aborted = () => this.#fail(this.#signal.reason);
     // agent:false prevents environment proxy adoption on the API connection.
     this.#socket = new WebSocket(connection.url, {
@@ -333,6 +336,10 @@ export class Profile {
     } finally {
       options.signal?.removeEventListener("abort", aborted);
     }
+  }
+
+  report(options: OperationOptions = {}): Promise<boolean> {
+    return this.#reporter(this.requestId, options);
   }
 
   close(): Promise<void> {

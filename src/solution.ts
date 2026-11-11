@@ -6,6 +6,10 @@ import { httpURL } from "./models.js";
 export interface OperationOptions {
   readonly signal?: AbortSignal;
 }
+export type Reporter = (
+  requestId: string,
+  options?: OperationOptions,
+) => Promise<boolean>;
 interface ResultData {
   url: string;
   body: string;
@@ -75,10 +79,15 @@ class TimedResult {
   readonly headers: Readonly<Record<string, string>>;
   readonly sendAt: number;
   readonly requestId: string;
-  constructor(data: ResultData) {
+  readonly #reporter: Reporter;
+  constructor(data: ResultData, reporter: Reporter) {
+    this.#reporter = reporter;
     this.headers = data.headers;
     this.sendAt = data.sendAt;
     this.requestId = data.requestId;
+  }
+  report(options: OperationOptions = {}): Promise<boolean> {
+    return this.#reporter(this.requestId, options);
   }
   async wait(options: OperationOptions = {}): Promise<void> {
     options.signal?.throwIfAborted();
@@ -96,8 +105,8 @@ class TimedResult {
 export class Request extends TimedResult {
   readonly url: string;
   readonly #body: string;
-  constructor(data: ResultData) {
-    super(data);
+  constructor(data: ResultData, reporter: Reporter) {
+    super(data, reporter);
     this.url = data.url;
     this.#body = data.body;
     Object.freeze(this);
@@ -111,8 +120,8 @@ export class Request extends TimedResult {
 }
 export class FwcimResult extends TimedResult {
   readonly #metadata1: string;
-  constructor(data: ResultData) {
-    super(data);
+  constructor(data: ResultData, reporter: Reporter) {
+    super(data, reporter);
     this.#metadata1 = data.metadata1;
     Object.freeze(this);
   }

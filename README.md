@@ -1,7 +1,6 @@
 # @nullgate/sdk
 
-Prepare target requests from observed pages. You send them with your own HTTP client.
-Requires Node.js 22.22 or newer.
+Prepare target requests from observed pages for Node.js 22.22 or newer. Send them with your own HTTP client.
 
 ```sh
 npm install github:nullgate-club/nullgate-sdk-ts
@@ -49,6 +48,7 @@ const sent = await fetch(sensor.url, {
 console.log(sent.status);
 ```
 
+- Reporting: `await result.report()` or `await ng.report(requestId)` returns HTTP delivery status, not target acceptance or a refund.
 - Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL. Results preserve server header casing and order.
 - API transport: `new Nullgate(key, { fetch })` injects API HTTP only, never target requests or the ThreatMetrix socket.
 - Inputs: `prepareInputs([{ id: "password", value }])` returns `PreparedInput[]` accepted by sensor and FWCIM without sending raw passwords.

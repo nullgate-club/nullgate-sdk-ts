@@ -465,8 +465,13 @@ export function prepareFwcim(
   page: Page,
   formSelector: string | null,
   timing: Readonly<Record<string, number>>,
-  inputs: readonly (FwcimInput | PreparedFwcimInput)[],
-  actions: readonly FwcimAction[],
+  inputs: readonly (FwcimInput | PreparedFwcimInput)[] | null | undefined,
+  actions: readonly FwcimAction[] | null | undefined,
+  options: {
+    submitted?: boolean;
+    referrer?: string;
+    historyLength?: number | null;
+  } = {},
 ): Record<string, unknown> {
   const document = documentFor(page);
   if (
@@ -496,12 +501,26 @@ export function prepareFwcim(
     if (matches.length !== 1 || form?.name !== "form")
       throw new TypeError("form must select exactly one form");
   }
+  if (
+    ("submitted" in options && typeof options.submitted !== "boolean") ||
+    ("referrer" in options && typeof options.referrer !== "string") ||
+    (options.historyLength != null &&
+      (!Number.isInteger(options.historyLength) || options.historyLength < 1))
+  )
+    throw new TypeError("Invalid FWCIM submitted, referrer, or historyLength");
   return {
     ...(formSelector === null ? {} : { form_selector: formSelector }),
-    referrer: "",
-    submitted: true,
+    referrer: options.referrer ?? "",
+    submitted: options.submitted ?? true,
+    ...(options.historyLength == null
+      ? {}
+      : { history_length: options.historyLength }),
     performance_timing: { ...timing },
-    inputs: prepareDocumentInputs(document, detached(inputs), form),
-    actions: prepareFwcimActions(detached(actions)),
+    ...(inputs == null
+      ? {}
+      : { inputs: prepareDocumentInputs(document, detached(inputs), form) }),
+    ...(actions == null
+      ? {}
+      : { actions: prepareFwcimActions(detached(actions)) }),
   };
 }
