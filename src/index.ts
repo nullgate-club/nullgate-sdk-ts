@@ -20,6 +20,7 @@ export { NullgateError } from "./errors.js";
 export type { PagehideOptions, Profile } from "./profile.js";
 export type { FwcimResult, Request } from "./solution.js";
 export type {
+  Collector,
   TargetFetch,
   TargetRequest,
   TargetResponse,

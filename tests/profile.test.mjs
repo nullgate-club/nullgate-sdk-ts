@@ -367,3 +367,139 @@ for (const scriptUrl of [undefined, "/explicit-tags.js"]) {
     await live.close();
   });
 }
+
+const collectors = [
+  {
+    url: "https://dfme.kleinanzeigen.de:443/wrapper.js?opaque=%2f+%2B&x=two&empty=",
+    orgId: "181rzcrc",
+    sessionId: "observed-visit",
+  },
+  {
+    url: "http://collector.example:0/profile",
+    orgId: "org",
+    sessionId: "visit",
+  },
+  {
+    url: "https://collector.example:/profile",
+    orgId: "org",
+    sessionId: "visit",
+  },
+  { url: "https://collector.example/\ufeff", orgId: " \r\n", sessionId: "\t " },
+];
+for (const collector of collectors) {
+  test(`explicit collector preserves the server start shape: ${collector.url}`, async (t) => {
+    const baseUrl = await serve(t, (socket, message) => {
+      if (message.type === "start") {
+        assert.equal(Object.hasOwn(message, "tags_url"), false);
+        assert.deepEqual(message.collector, {
+          url: collector.url,
+          org_id: collector.orgId,
+          session_id: collector.sessionId,
+        });
+        hello(socket);
+        socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+      } else if (message.type === "close") socket.close();
+    });
+    // Explicit collectors must bypass even ambiguous automatic tags discovery.
+    const document = new Nullgate("fake", { baseUrl })
+      .session({ userAgent: "browser" })
+      .page(
+        "https://shop.example/login",
+        `<script src="${tags}"></script><script src="${tags}&other=1"></script>`,
+      );
+    const live = await document.threatmetrix({
+      send: async () => assert.fail("must not send"),
+      collector,
+      scriptUrl: null,
+    });
+    await live.close();
+  });
+}
+
+const invalidCollectors = [
+  undefined,
+  false,
+  [],
+  {},
+  { url: "https://collector.example/profile", orgId: "org" },
+  { url: "https://collector.example/profile", sessionId: "visit" },
+  { orgId: "org", sessionId: "visit" },
+  { url: "https://collector.example/profile", orgId: "", sessionId: "visit" },
+  { url: "https://collector.example/profile", orgId: 1, sessionId: "visit" },
+  { url: "https://collector.example/profile", orgId: "org", sessionId: "" },
+  { url: "https://collector.example/profile", orgId: "org", sessionId: 1 },
+  {
+    url: "https://collector.example/profile",
+    orgId: "org",
+    sessionId: "visit",
+    extra: "unsupported",
+  },
+  ...[
+    "",
+    "/relative",
+    "//collector.example/profile",
+    "ftp://collector.example/profile",
+    "https://user:password@collector.example/profile",
+    "https://@collector.example/profile",
+    "https://collector.example/profile#",
+    "https://collector.example/profile\\path",
+    "https://collector.example/white space",
+    "https://collector.example/\u0085",
+    "https://collector.example/\u001c",
+    "https://collector.example:-1/profile",
+    "https://collector.example:65536/profile",
+    "https://collector.example:invalid/profile",
+  ].map((url) => ({ url, orgId: "org", sessionId: "visit" })),
+];
+for (const [index, collector] of invalidCollectors.entries()) {
+  test(`invalid collector ${index} fails before starting a profile`, async (t) => {
+    const baseUrl = await serve(t, () =>
+      assert.fail("must not start a profile"),
+    );
+    const document = new Nullgate("fake", { baseUrl })
+      .session({ userAgent: "browser" })
+      .page("https://shop.example/login", "");
+    await assert.rejects(
+      document.threatmetrix({
+        send: async () => assert.fail("must not send"),
+        collector: /** @type {any} */ (collector),
+      }),
+      {
+        code:
+          collector === undefined ? "protection_not_found" : "invalid_request",
+      },
+    );
+  });
+}
+for (const scriptUrl of ["", "/tags.js", tags]) {
+  test(`collector and explicit scriptUrl ${JSON.stringify(scriptUrl)} are mutually exclusive`, async () => {
+    const document = page(new Nullgate("fake"));
+    await assert.rejects(
+      document.threatmetrix({
+        send: async () => assert.fail("must not send"),
+        collector: {
+          url: "https://collector.example/profile",
+          orgId: "org",
+          sessionId: "visit",
+        },
+        scriptUrl,
+      }),
+      { code: "invalid_request" },
+    );
+  });
+}
+test("null collector selects the tags entry instead", async (t) => {
+  const baseUrl = await serve(t, (socket, message) => {
+    if (message.type === "start") {
+      assert.equal(Object.hasOwn(message, "collector"), false);
+      assert.equal(message.tags_url, tags);
+      hello(socket);
+      socket.send(JSON.stringify({ type: "ready", request_id: requestId }));
+    } else if (message.type === "close") socket.close();
+  });
+  const live = await page(new Nullgate("fake", { baseUrl })).threatmetrix({
+    send: async () => assert.fail("must not send"),
+    collector: null,
+  });
+  await live.close();
+});

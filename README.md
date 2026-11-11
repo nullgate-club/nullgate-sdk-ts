@@ -53,7 +53,7 @@ Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL.
 
 Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
 
-ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`; call `await tmx.pagehide()` when leaving.
+ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`, or pass `collector: { url, orgId, sessionId }` for [Kleinanzeigen](examples/kleinanzeigen.ts). Call `await tmx.pagehide()` when leaving.
 
 Errors: catch `NullgateError` and inspect `code`, `message`, `requestId`, and `status`. Maintenance retries are automatic.
 

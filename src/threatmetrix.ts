@@ -1,4 +1,5 @@
-import { Page, type ScriptReference } from "./models.js";
+import { NullgateError } from "./errors.js";
+import { httpURL, Page, type ScriptReference } from "./models.js";
 import {
   gatherRelay,
   parseTargetProxy,
@@ -6,6 +7,56 @@ import {
   type TargetProxy,
   type TurnServer,
 } from "./turn.js";
+
+export interface Collector {
+  readonly url: string;
+  readonly orgId: string;
+  readonly sessionId: string;
+}
+
+/** @internal Match the server's finite collector message without rewriting its URL. */
+export function prepareCollector(value: Collector): {
+  url: string;
+  org_id: string;
+  session_id: string;
+} {
+  const invalid = (): never => {
+    throw new NullgateError(
+      "invalid_request",
+      "collector requires an absolute HTTP(S) URL without credentials, fragments, whitespace or backslashes, and nonempty orgId and sessionId strings",
+    );
+  };
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return invalid();
+  const keys = Object.keys(value);
+  if (
+    keys.length !== 3 ||
+    keys.some((key) => !["url", "orgId", "sessionId"].includes(key))
+  )
+    return invalid();
+  if (
+    typeof value.url !== "string" ||
+    !/^https?:\/\/[^/?#]+/i.test(value.url) ||
+    /^https?:\/\/[^/?#]*@/i.test(value.url) ||
+    /[#\\\t-\r\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/.test(
+      value.url,
+    )
+  )
+    return invalid();
+  try {
+    httpURL(value.url, "collector.url");
+  } catch {
+    return invalid();
+  }
+  if (
+    typeof value.orgId !== "string" ||
+    value.orgId.length === 0 ||
+    typeof value.sessionId !== "string" ||
+    value.sessionId.length === 0
+  )
+    return invalid();
+  return { url: value.url, org_id: value.orgId, session_id: value.sessionId };
+}
 
 /** @internal */
 export function isThreatMetrixTagsURL(url: URL): boolean {

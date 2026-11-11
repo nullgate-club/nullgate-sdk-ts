@@ -75,7 +75,7 @@ for (const operation of ["sensor", "pixel", "sbsd", "fwcim"]) {
             ? await page.sbsd({
                 script: "source",
                 cookies: new Map([
-                  ["sbsd", "observed"],
+                  ["bm_so", "observed"],
                   ["private", "omit"],
                 ]),
               })
@@ -113,7 +113,7 @@ for (const operation of ["sensor", "pixel", "sbsd", "fwcim"]) {
                 script_url:
                   "https://shop.example/sbsd?v=00000000-0000-0000-0000-00000000004a",
                 script: "source",
-                cookies: { sbsd: "observed" },
+                cookies: { bm_so: "observed" },
               }
             : {
                 form_selector: "#login",
@@ -303,4 +303,60 @@ for (const operation of ["sensor", "fwcim"]) {
       assert.deepEqual(Object.entries(result.headers), expected);
     });
   }
+}
+
+// Dropping an observed product cookie changes generation; unrelated cookies must stay local.
+for (const [operation, expected] of Object.entries({
+  sensor: { _abck: "abck", bm_sz: "size" },
+  sbsd: { bm_so: "so", sbsd_o: "observed", bm_s: "s" },
+  fwcim: {
+    "session-id": "visit",
+    "session-token": "token",
+    "ubid-main": "browser",
+  },
+})) {
+  test(`${operation} forwards exactly its server-consumed v1 cookie set`, async (t) => {
+    const allCookies = {
+      _abck: "abck",
+      bm_sz: "size",
+      bm_so: "so",
+      sbsd_o: "observed",
+      bm_s: "s",
+      sbsd: "obsolete",
+      "session-id": "visit",
+      "session-token": "token",
+      "ubid-main": "browser",
+      customer_auth: "private",
+    };
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async (
+        /** @type {RequestInfo | URL} */ _input,
+        /** @type {RequestInit | undefined} */ init,
+      ) => {
+        assert.deepEqual(JSON.parse(String(init?.body)).cookies, expected);
+        return Response.json(
+          operation === "fwcim"
+            ? wire.amazon.components.schemas.Generated.examples[0]
+            : wire.akamai.paths[`/akamai/${operation}`].post.responses["200"]
+                .content["application/json"].example,
+        );
+      },
+    );
+    const document = new Nullgate("fake")
+      .session({ userAgent: "browser" })
+      .page(url, html);
+    const cookies = new Map(Object.entries(allCookies));
+    if (operation === "fwcim")
+      await document.fwcim({
+        form: "#login",
+        timing: { navigationStart: 1000 },
+        inputs: [],
+        cookies,
+      });
+    else if (operation === "sensor")
+      await document.sensor({ script: "source", cookies });
+    else await document.sbsd({ script: "source", cookies });
+  });
 }

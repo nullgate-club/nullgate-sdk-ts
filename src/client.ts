@@ -14,7 +14,12 @@ import { local, NullgateError, retryDelay } from "./errors.js";
 import { Page as Document, httpURL, type Protection } from "./models.js";
 import { Profile } from "./profile.js";
 import { FwcimResult, Request, resultData } from "./solution.js";
-import { Target, type TargetFetch } from "./threatmetrix.js";
+import {
+  type Collector,
+  prepareCollector,
+  Target,
+  type TargetFetch,
+} from "./threatmetrix.js";
 
 export interface ClientOptions {
   readonly baseUrl?: string;
@@ -65,7 +70,8 @@ export interface FwcimOptions {
 }
 export interface ThreatMetrixOptions {
   readonly send: TargetFetch;
-  readonly scriptUrl?: string;
+  readonly scriptUrl?: string | null;
+  readonly collector?: Collector | null;
   readonly proxy?: string | null;
 }
 export interface UsageOptions {
@@ -397,7 +403,7 @@ export class Session {
   /** @internal */
   _profile(
     document: Document,
-    scriptUrl: string,
+    entry: Record<string, unknown>,
     options: ThreatMetrixOptions,
   ): Promise<Profile> {
     return this.#client._profile(
@@ -405,7 +411,7 @@ export class Session {
         ...this._context("threatmetrix", document),
         type: "start",
         at_ms: Date.now(),
-        tags_url: scriptUrl,
+        ...entry,
       },
       options.send,
       options.proxy ?? null,
@@ -613,7 +619,11 @@ export class Page {
     return this.#generate("sbsd", {
       script_url: scriptUrl,
       script: options.script,
-      cookies: await cookiesFor(options.cookies, ["sbsd"], this.#document.url),
+      cookies: await cookiesFor(
+        options.cookies,
+        ["bm_so", "sbsd_o", "bm_s"],
+        this.#document.url,
+      ),
     });
   }
   #generate(
@@ -667,12 +677,31 @@ export class Page {
         "send must be a request callback",
       );
     local(() => documentFor(this.#document));
-    const scriptUrl = this.#candidate("profile", options.scriptUrl)?.scriptURL;
+    if (options.collector != null) {
+      if (options.scriptUrl != null)
+        throw new NullgateError(
+          "invalid_request",
+          "Provide exactly one scriptUrl or collector",
+        );
+      return this.#session._profile(
+        this.#document,
+        { collector: prepareCollector(options.collector) },
+        options,
+      );
+    }
+    const scriptUrl = this.#candidate(
+      "profile",
+      options.scriptUrl ?? undefined,
+    )?.scriptURL;
     if (scriptUrl === undefined)
       throw new NullgateError(
         "protection_not_found",
         "No ThreatMetrix tags script found; provide scriptUrl",
       );
-    return this.#session._profile(this.#document, scriptUrl, options);
+    return this.#session._profile(
+      this.#document,
+      { tags_url: scriptUrl },
+      options,
+    );
   }
 }
