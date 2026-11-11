@@ -44,15 +44,14 @@ export function resultData(
     Array.isArray(value.headers)
   )
     return invalid();
-  const headers = new Headers();
+  const entries = Object.entries(value.headers);
+  if (entries.some(([, field]) => typeof field !== "string")) return invalid();
+  const headers = Object.fromEntries(entries) as Record<string, string>;
   try {
-    for (const [name, field] of Object.entries(value.headers)) {
-      if (typeof field !== "string") return invalid();
-      headers.set(name, field);
-    }
+    // Preserve authoritative header casing and order, including case-distinct keys.
     if (!amazon) {
-      headers.set("Referer", pageUrl);
-      headers.set("Origin", new URL(pageUrl).origin);
+      headers.origin = new URL(pageUrl).origin;
+      headers.referer = pageUrl;
       if (typeof value.url !== "string" || typeof value.body !== "string")
         return invalid();
       const url = httpURL(value.url, "request.url");
@@ -66,7 +65,7 @@ export function resultData(
     url: amazon ? "" : (value.url as string),
     body: amazon ? "" : (value.body as string),
     metadata1: amazon ? (value.metadata1 as string) : "",
-    headers: Object.freeze(Object.fromEntries(headers)),
+    headers: Object.freeze(headers),
     sendAt: value.send_at,
     requestId: data.request_id,
   };

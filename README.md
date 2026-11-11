@@ -49,7 +49,7 @@ const sent = await fetch(sensor.url, {
 console.log(sent.status);
 ```
 
-Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL.
+Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL. Results preserve server header casing and order.
 
 Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
 

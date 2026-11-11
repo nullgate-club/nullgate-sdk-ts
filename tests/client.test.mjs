@@ -229,3 +229,78 @@ test("missing credentials and invalid configuration use the one error type", () 
     NullgateError,
   );
 });
+
+for (const operation of ["sensor", "fwcim"]) {
+  for (const hasLowercase of [false, true]) {
+    test(`${operation} preserves server header casing and order, lowercase overrides: ${hasLowercase}`, async (t) => {
+      /** @type {[string, string][]} */
+      const serverEntries = [
+        ["Z-Trace", "first"],
+        ["Accept-Language", "en-US,en;q=0.9"],
+        ["Origin", "server-cased-origin"],
+        ...(hasLowercase
+          ? /** @type {[string, string][]} */ ([
+              ["origin", "server-lowercase-origin"],
+            ])
+          : []),
+        ["Referer", "server-cased-referer"],
+        ...(hasLowercase
+          ? /** @type {[string, string][]} */ ([
+              ["referer", "server-lowercase-referer"],
+            ])
+          : []),
+        ["A-Trace", "last"],
+      ];
+      t.mock.method(globalThis, "fetch", async () =>
+        Response.json({
+          ...(operation === "fwcim"
+            ? {
+                metadata1: "metadata",
+                headers: Object.fromEntries(serverEntries),
+                send_at: 0,
+              }
+            : {
+                request: {
+                  url: "https://shop.example/sensor",
+                  body: "payload",
+                  headers: Object.fromEntries(serverEntries),
+                  send_at: 0,
+                },
+              }),
+          session: "next",
+          request_id: "id",
+        }),
+      );
+      const page = new Nullgate("fake")
+        .session({ userAgent: "browser" })
+        .page(url, html);
+      const result =
+        operation === "fwcim"
+          ? await page.fwcim({
+              form: "#login",
+              timing: { navigationStart: 1 },
+              inputs: {},
+            })
+          : await page.sensor({ script: "source", cookies: {} });
+      const expected =
+        operation === "fwcim"
+          ? serverEntries
+          : hasLowercase
+            ? [
+                ["Z-Trace", "first"],
+                ["Accept-Language", "en-US,en;q=0.9"],
+                ["Origin", "server-cased-origin"],
+                ["origin", "https://shop.example"],
+                ["Referer", "server-cased-referer"],
+                ["referer", url],
+                ["A-Trace", "last"],
+              ]
+            : [
+                ...serverEntries,
+                ["origin", "https://shop.example"],
+                ["referer", url],
+              ];
+      assert.deepEqual(Object.entries(result.headers), expected);
+    });
+  }
+}
