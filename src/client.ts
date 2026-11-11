@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Params } from "./akamai.js";
+import {
+  FwcimParams,
+  FwcimSolution,
+  normalizeFwcimResponse,
+  type PreparedFwcimRequest,
+} from "./amazon.js";
 import { type FindOptions, findProtections } from "./discovery.js";
 import { NullgateClosedError, NullgateTransportError } from "./errors.js";
 import { httpURL, type Page, type Protection } from "./models.js";
@@ -17,6 +24,7 @@ export interface ClientOptions {
   readonly baseURL?: string;
   readonly analyticsURL?: string;
   readonly profileBaseURL?: string;
+  readonly amazonBaseURL?: string;
   readonly timeoutMs?: number;
   readonly reportTimeoutMs?: number;
   /** Native-fetch-compatible seam for a caller-owned transport or local tests. */
@@ -90,6 +98,7 @@ export class NullgateClient {
   readonly #baseURL: string;
   readonly #analyticsURL: string;
   readonly #profileBaseURL: string;
+  readonly #amazonBaseURL: string;
   readonly #timeoutMs: number;
   readonly #reportTimeoutMs: number;
   readonly #fetch: typeof globalThis.fetch;
@@ -116,6 +125,10 @@ export class NullgateClient {
     this.#profileBaseURL = serviceURL(
       options.profileBaseURL ?? "https://threatmetrix.nullgate.club",
       "profileBaseURL",
+    );
+    this.#amazonBaseURL = serviceURL(
+      options.amazonBaseURL ?? "https://amazon.nullgate.club",
+      "amazonBaseURL",
     );
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#reportTimeoutMs = options.reportTimeoutMs ?? 3_000;
@@ -158,7 +171,7 @@ export class NullgateClient {
     identity: string,
     userAgent: string,
     stateId: string | undefined,
-    request: PreparedRequest,
+    request: PreparedRequest | PreparedFwcimRequest,
     signal: AbortSignal,
     rotateState: (stateId: string) => void,
   ): Promise<{ response: Response; body: unknown }> {
@@ -174,28 +187,46 @@ export class NullgateClient {
     };
     if (stateId !== undefined) headers["X-State-ID"] = stateId;
     try {
-      const response = await this.#fetch(
-        `${this.#baseURL}/v1/${identity}/generate?type=${request.operation}`,
-        {
-          method: "POST",
-          headers,
-          body: request.body,
-          redirect: "manual",
-          credentials: "omit",
-          signal: deadline,
-        },
-      );
-      const nextStateId = response.headers.get("X-State-ID");
-      if (nextStateId !== null) rotateState(nextStateId);
-      const text = await response.text();
-      deadline.throwIfAborted();
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = text;
+      for (let attempt = 0; ; attempt += 1) {
+        const response = await this.#fetch(
+          `${request.operation === "fwcim" ? this.#amazonBaseURL : this.#baseURL}/v1/${identity}/generate?type=${request.operation}`,
+          {
+            method: "POST",
+            headers,
+            body: request.body,
+            redirect: "manual",
+            credentials: "omit",
+            signal: deadline,
+          },
+        );
+        const retryAfter = response.headers.get("Retry-After");
+        const updating =
+          response.status === 503 &&
+          response.headers.get("X-Nullgate-Maintenance") === "1" &&
+          retryAfter !== null &&
+          /^\d+(?:\.\d+)?$/.test(retryAfter) &&
+          Number(retryAfter) <= 5;
+        if (updating && attempt < 2) {
+          void response.body?.cancel().catch(() => undefined);
+          await sleep(Number(retryAfter) * 1000, undefined, {
+            signal: deadline,
+          });
+          continue;
+        }
+        if (!updating) {
+          const nextStateId = response.headers.get("X-State-ID");
+          if (nextStateId !== null) rotateState(nextStateId);
+        }
+        const text = await response.text();
+        deadline.throwIfAborted();
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = text;
+        }
+        return { response, body };
       }
-      return { response, body };
     } catch (error) {
       deadline.throwIfAborted();
       if (networkFailure(error)) throw new NullgateTransportError();
@@ -220,24 +251,34 @@ export class NullgateClient {
     if (stateId !== undefined) headers["X-State-ID"] = stateId;
     const url = new URL(`${this.#profileBaseURL}/v1/${identity}/profile`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    const profile = Profile._connect({
-      url: url.href,
-      headers,
-      start,
-      target,
+    const deadline = AbortSignal.any([
       signal,
-      timeoutMs: this.#timeoutMs,
-      rotateState,
-      reporter: this.report.bind(this),
-    });
-    this.#profiles.add(profile);
-    void profile._closed.then(() => this.#profiles.delete(profile));
-    try {
-      await profile._waitForReady();
-      return profile;
-    } catch (error) {
-      await profile.close();
-      throw error;
+      AbortSignal.timeout(this.#timeoutMs),
+    ]);
+    const startedAt = Date.now();
+    for (let attempt = 0; ; attempt += 1) {
+      deadline.throwIfAborted();
+      const profile = Profile._connect({
+        url: url.href,
+        headers,
+        start,
+        target,
+        signal,
+        timeoutMs: Math.max(1, this.#timeoutMs - (Date.now() - startedAt)),
+        rotateState,
+        reporter: this.report.bind(this),
+      });
+      this.#profiles.add(profile);
+      void profile._closed.then(() => this.#profiles.delete(profile));
+      try {
+        await profile._waitForReady();
+        return profile;
+      } catch (error) {
+        await profile.close();
+        const delay = profile._maintenanceDelay;
+        if (attempt >= 2 || delay === undefined) throw error;
+        await sleep(delay * 1000, undefined, { signal: deadline });
+      }
     }
   }
 
@@ -303,7 +344,9 @@ export class NullgateSession {
   readonly #client: NullgateClient;
   readonly #lifetime = new AbortController();
   #stateId: string | undefined = randomUUID();
+  #amazonStateId: string | undefined = randomUUID();
   #pending: Promise<void> = Promise.resolve();
+  #amazonPending: Promise<void> = Promise.resolve();
   readonly #profiles = new Set<Profile>();
 
   /** @internal */
@@ -373,6 +416,43 @@ export class NullgateSession {
     return abortable(pending, signal);
   }
 
+  async fwcim(
+    params: FwcimParams,
+    options: OperationOptions = {},
+  ): Promise<FwcimSolution> {
+    const signal = AbortSignal.any([
+      this.#lifetime.signal,
+      this.#client._signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
+    signal.throwIfAborted();
+    if (!(params instanceof FwcimParams))
+      throw new TypeError("fwcim requires FwcimParams");
+    const request = params._request(this.timezone);
+    const pending = this.#amazonPending.then(async () => {
+      signal.throwIfAborted();
+      const generated = await this.#client._generate(
+        this.identity,
+        this.userAgent,
+        this.#amazonStateId,
+        request,
+        signal,
+        (stateId) => {
+          this.#amazonStateId = stateId;
+        },
+      );
+      signal.throwIfAborted();
+      return new FwcimSolution(
+        normalizeFwcimResponse(generated.response, generated.body),
+      );
+    });
+    this.#amazonPending = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return abortable(pending, signal);
+  }
+
   async profile(
     params: ThreatMetrixParams,
     target: Target,
@@ -416,11 +496,12 @@ export class NullgateSession {
   close(): void {
     this.#lifetime.abort(new NullgateClosedError("session"));
     this.#stateId = undefined;
+    this.#amazonStateId = undefined;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
     this.close();
-    await this.#pending;
+    await Promise.all([this.#pending, this.#amazonPending]);
     await Promise.all(Array.from(this.#profiles, (profile) => profile.close()));
   }
 }

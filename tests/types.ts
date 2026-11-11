@@ -2,6 +2,7 @@ import {
   AmbiguousProtectionError,
   type ClientOptions,
   type FindOptions,
+  type FwcimAction,
   findProtections,
   NullgateClient,
   type Page,
@@ -127,4 +128,15 @@ export function rejectedPairings(page: Page): void {
   new ThreatMetrixParams(collector);
   // @ts-expect-error Akamai parameters cannot contain a direct collector.
   new SensorParams(collector, "source");
+}
+
+export function fwcimActionContract(): void {
+  const event: FwcimAction = { type: "touchmove", touches: [{ x: -1, y: 2 }] };
+  const invalid: FwcimAction = {
+    type: "input",
+    // @ts-expect-error FWCIM never accepts values, including prepared summaries.
+    value: { length: 1, hash: "hash", counts: [1, 0, 1, 0] },
+  };
+  void event;
+  void invalid;
 }

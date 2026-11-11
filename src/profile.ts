@@ -100,6 +100,7 @@ export class Profile {
   #stopped = false;
   #failure: unknown;
   #errorFormat = false;
+  #maintenanceRetryAfter: number | undefined;
   readonly #targetErrors = new Map<number, unknown>();
 
   private constructor(connection: ProfileConnection) {
@@ -129,6 +130,17 @@ export class Profile {
       if (this.#stopped) {
         response.destroy();
         return;
+      }
+      const retryAfter = response.headers["retry-after"];
+      const maintenance =
+        response.statusCode === 503 &&
+        response.headers["x-nullgate-maintenance"] === "1" &&
+        typeof retryAfter === "string" &&
+        /^\d+(?:\.\d+)?$/.test(retryAfter) &&
+        Number(retryAfter) <= 5;
+      if (!maintenance) {
+        const stateId = response.headers["x-state-id"];
+        if (typeof stateId === "string") connection.rotateState(stateId);
       }
       const chunks: Buffer[] = [];
       let size = 0;
@@ -186,6 +198,10 @@ export class Profile {
       response.once("aborted", onIncomplete);
       response.once("error", onIncomplete);
       response.once("close", onIncomplete);
+      if (maintenance) {
+        this.#maintenanceRetryAfter = Number(retryAfter);
+        finish();
+      }
     });
     this.#socket.once("close", () => {
       if (!this.#stopped) {
@@ -237,6 +253,11 @@ export class Profile {
   async _waitForReady(): Promise<void> {
     await this.#ready.promise;
     this.#assertActive();
+  }
+
+  /** @internal Definitive pre-work handshake denial only. */
+  get _maintenanceDelay(): number | undefined {
+    return this.#maintenanceRetryAfter;
   }
 
   /** @internal */

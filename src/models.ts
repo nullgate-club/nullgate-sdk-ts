@@ -20,6 +20,12 @@ export function httpURL(value: string, name: string): URL {
   return url;
 }
 
+export interface PageOptions {
+  /** Caller-observed navigation start; defaults to the time of construction. */
+  readonly startedAtMs?: number;
+  readonly documentId?: string;
+}
+
 /** Caller-owned document. Discovery never fetches or executes its contents. */
 export class Page {
   readonly url: string;
@@ -27,14 +33,26 @@ export class Page {
   readonly documentId: string;
   readonly startedAtMs: number;
 
-  constructor(url: string, html: string) {
+  constructor(url: string, html: string, options: PageOptions = {}) {
     httpURL(url, "Page.url");
     if (typeof html !== "string")
       throw new TypeError("Page.html must be a string");
+    if (
+      options.startedAtMs !== undefined &&
+      (!Number.isSafeInteger(options.startedAtMs) || options.startedAtMs < 0)
+    )
+      throw new TypeError("Page.startedAtMs must be a nonnegative integer");
+    if (
+      options.documentId !== undefined &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        options.documentId,
+      )
+    )
+      throw new TypeError("Page.documentId must be a UUID");
     this.url = url;
     this.html = html;
-    this.documentId = randomUUID();
-    this.startedAtMs = Date.now();
+    this.documentId = options.documentId ?? randomUUID();
+    this.startedAtMs = options.startedAtMs ?? Date.now();
     Object.freeze(this);
   }
 }

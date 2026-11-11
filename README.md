@@ -2,9 +2,9 @@
 
 An ESM SDK for Node.js 22.22 or newer. JavaScript and TypeScript use the same API; the package includes TypeScript declarations. The core uses native `fetch` for Nullgate, not for your target website.
 
-The default endpoints are `https://akamai.nullgate.club` for generation,
-`https://threatmetrix.nullgate.club` for active profiling, and
-`https://analytics.nullgate.club` for optional diagnostic reports.
+The default endpoints are `https://akamai.nullgate.club` for Akamai generation,
+`https://amazon.nullgate.club` for Amazon FWCIM, `https://threatmetrix.nullgate.club`
+for active profiling, and `https://analytics.nullgate.club` for optional reports.
 
 ## Install from source
 
@@ -145,6 +145,97 @@ Parameters are paired with their matching concrete protection:
 `script` is source text fetched by the caller from the candidate's `scriptURL`. Cookies are explicit string mappings. For Sensor, missing/null inputs or actions preserve server defaults; empty arrays explicitly override them. `inputs` contains caller-filled field attributes and optional raw `value` strings. Values are summarized and SHA-256 hashed locally as UTF-16LE before transmission. `prepareInputs` exposes the same operation for callers who need the prepared representation. Actions use the service's explicit JSON event format; input/change action values must already be summaries, not raw secrets.
 
 Each input is a flat string map, for example `{ selector: "#login input[name=email]", name: "email", value: email }`. The optional reserved `selector` is sent at the top level of the prepared input, not in `attributes`, and is omitted when absent. It must match exactly one native `input` or `textarea`; any nonempty `id` or `name` must also match that element. A selector can be used without `id` or `name`; omitting it preserves the existing id/name binding.
+
+## Amazon FWCIM form metadata
+
+FWCIM takes a caller-owned `Page`, not a discovered protection or JavaScript
+source. It never fetches or executes Amazon JavaScript, logs in, sends passwords,
+encrypts credentials, or submits the caller's form.
+
+```ts
+import { FwcimParams, NullgateClient, Page } from "@nullgate/sdk";
+
+// html, documentURL, observedTiming and email come from your own integration.
+// Use real observed navigation timestamps; do not fabricate browser measurements.
+const page = new Page(documentURL, html, {
+  startedAtMs: observedTiming.navigationStart,
+});
+const client = new NullgateClient({
+  apiKey,
+  amazonBaseURL: "https://amazon.nullgate.club", // optional independent override
+});
+const session = client.open({ identity, userAgent, timezone: "Europe/Berlin" });
+try {
+  const solution = await session.fwcim(
+    new FwcimParams(page, {
+      performanceTiming: observedTiming,
+      formSelector: "#signIn",
+      inputs: [{ name: "email", value: email }],
+      cookies, // caller-owned cookie jar snapshot
+      submitted: true,
+    }),
+  );
+  // Keep metadata1 private. URLSearchParams encodes its raw value exactly once.
+  formFields.set("metadata1", solution.metadata1);
+  await solution.wait();
+  // Submit formFields.toString() with your own target HTTP transport and jar,
+  // applying solution.headers. Password encryption remains your responsibility.
+} finally {
+  session.close();
+  client.close();
+}
+```
+
+`performanceTiming` is required. Its positive `navigationStart` must exactly equal
+`page.startedAtMs`. `Page` defaults to its construction time; pass an observed
+`startedAtMs` (and optionally an existing `documentId`) when representing an
+already observed document. All nonzero timing timestamps must be real observations
+within that document, in Unix milliseconds, and cannot precede `navigationStart`.
+Zero remains an unknown timestamp for other timing fields. No geometry or timing is invented.
+Optional `referrer` and `historyLength` belong to the website context.
+Optional `cookies` must be a name-to-string mapping, not an array.
+
+Amazon has its own continuation state and request queue inside the session, separate from Akamai
+and ThreatMetrix. Amazon delays do not block either provider. Closing the session cancels both queues.
+Reuse that session and the same `Page` for one document;
+construct a fresh `Page` for a newly acquired document. `sendAt` is Unix seconds;
+`wait({ signal })` honors it and supports cancellation. The result exposes
+`metadata1`, `sendAt`, `headers`, and `requestId`. FWCIM diagnostic reporting is
+not supported.
+Default inspection and JSON serialization omit the sensitive metadata value.
+
+`prepareFwcimInputs(page, inputs)` exposes the same local summaries. Observations
+accept only `id`/`name` identity attributes, optional CSS `selector`, raw nonpassword
+`value`, optional measured `geometry: { width, height, left?, top? }`, and optional
+`text` equal to the value for canvas rendering. Selectors must match exactly one
+actual input/textarea and agree with supplied id/name. An explicit `formSelector`
+must select exactly one form; observed controls must be descendants of that node.
+HTML `form` attributes do not change the collector's descendant selection.
+Password controls are rejected before hashing/transport, including selector-only observations,
+normalized password types, `current-password`/`new-password` autocomplete tokens,
+and canonical `password`/`ap_password` ids or names.
+Form/input selection excludes inert template content, but the password guard still checks it.
+HTML with nonempty password values is rejected globally, including duplicate `value`
+attributes that DOM lookup normally ignores. Nonpassword values become
+redacted statistics and SHA-256 plus a wrapper CRC32 over CESU-8; the raw value is
+not transmitted unless you explicitly opt into canvas `text`. Amazon actions accept
+only the service event fields through `FwcimAction`, with typed numeric/boolean facts,
+touch objects requiring finite nonnull `x` and `y` and an optional integer `identifier`,
+nullable three-number vector arrays, and `input_summary` pairs. The SDK snapshots and
+validates detached wire objects without invoking caller serialization hooks.
+Raw `value`, `key`, `text`, and arbitrary nested payloads are rejected. Browser-side event semantics remain the
+service's responsibility. Omitted `inputs`/`actions` remain absent; `[]` explicitly
+overrides defaults. `submitted` defaults to true.
+
+Generation and profiling startup retry at most twice only for a definitive
+pre-work maintenance rejection: HTTP 503, numeric `Retry-After` from 0 through
+5 seconds, and `X-Nullgate-Maintenance` exactly `1`. The response body does not
+classify maintenance.
+Retries honor cancellation and the opening request timeout, and do not adopt
+rejected continuation state. Other responses retain rotated state as soon as
+headers arrive, even if their bodies later fail or are cancelled. Generic
+failures, transport errors, established profiles, and caller-owned target
+requests are never retried.
 
 ## Active ThreatMetrix profiles
 

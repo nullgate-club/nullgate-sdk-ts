@@ -34,6 +34,8 @@
     "example": "node examples/target.ts"
   },
   "dependencies": {
+    "css-select": "7.0.0",
+    "domhandler": "6.0.1",
     "htmlparser2": "12.0.0",
     "socks": "2.8.10",
     "werift-ice": "0.2.3",

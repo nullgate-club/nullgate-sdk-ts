@@ -18,6 +18,17 @@ export {
   SensorParams,
 } from "./akamai.js";
 export {
+  type FwcimAction,
+  type FwcimGeometry,
+  type FwcimInput,
+  type FwcimOptions,
+  FwcimParams,
+  FwcimSolution,
+  type FwcimSolutionData,
+  type PreparedFwcimInput,
+  prepareFwcimInputs,
+} from "./amazon.js";
+export {
   type ClientOptions,
   NullgateClient,
   type NullgateSession,
@@ -35,6 +46,7 @@ export {
 export {
   type JsonValue,
   Page,
+  type PageOptions,
   type Protection,
   type ScriptReference,
 } from "./models.js";
