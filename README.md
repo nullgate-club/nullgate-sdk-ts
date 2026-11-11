@@ -57,4 +57,4 @@ ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`, or pass `co
 
 Errors: catch `NullgateError` and inspect `code`, `message`, `requestId`, and `status`. Maintenance retries are automatic.
 
-[Documentation](https://docs.nullgate.club) · [Examples](examples) · Check: `npm run check`.
+[Documentation](https://v2.nullgate.club) · [Examples](examples) · Check: `npm run check`.
