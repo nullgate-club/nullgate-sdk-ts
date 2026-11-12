@@ -197,7 +197,7 @@ export class Nullgate {
   readonly #base: string;
   readonly #timeout: number;
   readonly #fetch: typeof globalThis.fetch | undefined;
-  #gzip: "unknown" | "enabled" | "disabled" = "unknown";
+  #gzip = true;
   /** @internal */
   readonly _reporter: Reporter;
   constructor(
@@ -312,7 +312,7 @@ export class Nullgate {
     try {
       for (let attempt = 0; ; attempt++) {
         const useGzip =
-          this.#gzip === "enabled" &&
+          this.#gzip &&
           !uncompressedFallback &&
           json !== undefined &&
           Buffer.byteLength(json, "utf8") >= 1024;
@@ -346,24 +346,8 @@ export class Nullgate {
             signal,
           },
         );
-        if (
-          this.#gzip !== "disabled" &&
-          response.headers
-            .get("Accept-Encoding")
-            ?.split(",")
-            .some((encoding) => {
-              const [name, ...parameters] = encoding.split(";");
-              return (
-                name?.trim().toLowerCase() === "gzip" &&
-                !parameters.some((parameter) =>
-                  /^q\s*=\s*0(?:\.0*)?$/i.test(parameter.trim()),
-                )
-              );
-            })
-        )
-          this.#gzip = "enabled";
         if (useGzip && (response.status === 413 || response.status === 415)) {
-          if (response.status === 415) this.#gzip = "disabled";
+          if (response.status === 415) this.#gzip = false;
           if (!uncompressedFallback && attempt < 2) {
             uncompressedFallback = true;
             await response.arrayBuffer();
