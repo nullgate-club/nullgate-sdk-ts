@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { gzipSync } from "node:zlib";
 import {
   type Action,
   type InputField,
@@ -196,6 +197,7 @@ export class Nullgate {
   readonly #base: string;
   readonly #timeout: number;
   readonly #fetch: typeof globalThis.fetch | undefined;
+  #gzip: "unknown" | "enabled" | "disabled" = "unknown";
   /** @internal */
   readonly _reporter: Reporter;
   constructor(
@@ -300,10 +302,22 @@ export class Nullgate {
   async _call(
     path: string,
     body?: Record<string, unknown>,
+    sensorScript?: string,
   ): Promise<Record<string, unknown>> {
     const signal = AbortSignal.timeout(Math.ceil(this.#timeout));
+    let json = body === undefined ? undefined : JSON.stringify(body);
+    let compressed: Buffer | undefined;
+    let uncompressedFallback = false;
+    let scriptFallback = false;
     try {
       for (let attempt = 0; ; attempt++) {
+        const useGzip =
+          this.#gzip === "enabled" &&
+          !uncompressedFallback &&
+          json !== undefined &&
+          Buffer.byteLength(json, "utf8") >= 1024;
+        if (useGzip && compressed === undefined)
+          compressed = gzipSync(json as string, { level: 1 });
         const response = await (this.#fetch ?? globalThis.fetch)(
           `${this.#base}${path}`,
           {
@@ -313,13 +327,49 @@ export class Nullgate {
               ...(body === undefined
                 ? {}
                 : { "Content-Type": "application/json" }),
+              ...(useGzip
+                ? {
+                    "Content-Encoding": "gzip",
+                    "Content-Length": String(compressed?.byteLength),
+                  }
+                : {}),
             },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            ...(json === undefined
+              ? {}
+              : {
+                  body: useGzip
+                    ? (compressed as Uint8Array<ArrayBuffer>)
+                    : json,
+                }),
             redirect: "manual",
             credentials: "omit",
             signal,
           },
         );
+        if (
+          this.#gzip !== "disabled" &&
+          response.headers
+            .get("Accept-Encoding")
+            ?.split(",")
+            .some((encoding) => {
+              const [name, ...parameters] = encoding.split(";");
+              return (
+                name?.trim().toLowerCase() === "gzip" &&
+                !parameters.some((parameter) =>
+                  /^q\s*=\s*0(?:\.0*)?$/i.test(parameter.trim()),
+                )
+              );
+            })
+        )
+          this.#gzip = "enabled";
+        if (useGzip && (response.status === 413 || response.status === 415)) {
+          if (response.status === 415) this.#gzip = "disabled";
+          if (!uncompressedFallback && attempt < 2) {
+            uncompressedFallback = true;
+            await response.arrayBuffer();
+            continue;
+          }
+        }
         let data: unknown;
         try {
           data = await response.json();
@@ -352,6 +402,20 @@ export class Nullgate {
             null,
             response.status,
           );
+        if (
+          value.code === "script_required" &&
+          sensorScript !== undefined &&
+          body !== undefined &&
+          !scriptFallback &&
+          attempt < 2
+        ) {
+          scriptFallback = true;
+          body = { ...body, script: sensorScript };
+          delete body.script_digest;
+          json = JSON.stringify(body);
+          compressed = undefined;
+          continue;
+        }
         const retry = retryDelay(response.headers.get("Retry-After"));
         if (
           value.code === "maintenance" &&
@@ -489,30 +553,15 @@ export class Session {
         ) {
           delete body.script;
           body.script_digest = digest;
-        } else if (sensor) {
-          this.#sensorRetention = undefined;
         }
-        let data: Record<string, unknown>;
-        try {
-          data = await this.#client._call(
-            `/${product}/${fields.operation}`,
-            body,
-          );
-        } catch (error) {
-          if (
-            !sensor ||
-            !(error instanceof NullgateError) ||
-            error.code !== "script_required"
-          )
-            throw error;
-          this.#sensorRetention = undefined;
-          delete body.script_digest;
-          body.script = fields.script;
-          data = await this.#client._call(
-            `/${product}/${fields.operation}`,
-            body,
-          );
-        }
+        if (sensor) this.#sensorRetention = undefined;
+        const data = await this.#client._call(
+          `/${product}/${fields.operation}`,
+          body,
+          sensor && typeof fields.script === "string"
+            ? fields.script
+            : undefined,
+        );
         const result = finish(data, this.#client._reporter);
         if (typeof data.session !== "string" || !data.session)
           throw new NullgateError("protocol_error", "Missing response session");

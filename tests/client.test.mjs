@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { inspect } from "node:util";
+import { gunzipSync } from "node:zlib";
 import { Nullgate, NullgateError } from "@nullgate/sdk";
 
 const wire = JSON.parse(
@@ -824,3 +825,273 @@ test("an older server never causes sensor scripts to be omitted", async () => {
     ],
   );
 });
+
+// Advertising compression must not change the JSON or break older servers.
+for (const [
+  advertisement,
+  enabled,
+] of /** @type {[string | null, boolean][]} */ ([
+  [null, false],
+  ["gzip", true],
+  ["br, GZIP;q=1", true],
+  ["gzip;q=0.000, br", false],
+])) {
+  test(`request gzip requires an advertised usable encoding: ${advertisement}`, async () => {
+    /** @type {RequestInit[]} */ const seen = [];
+    const client = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        seen.push(init ?? {});
+        return Response.json(sensorResponse, {
+          headers:
+            advertisement === null ? {} : { "Accept-Encoding": advertisement },
+        });
+      },
+    });
+    const page = client.session({ userAgent: "browser" }).page(url, html);
+    await page.sensor({ script: "source".repeat(300), cookies: {} });
+    await page.sensor({ script: "source".repeat(300), cookies: {} });
+    assert.equal(new Headers(seen[0]?.headers).has("Content-Encoding"), false);
+    assert.equal(
+      new Headers(seen[1]?.headers).get("Content-Encoding"),
+      enabled ? "gzip" : null,
+    );
+    if (enabled) {
+      const bytes = /** @type {Buffer} */ (seen[1]?.body);
+      assert.equal(
+        new Headers(seen[1]?.headers).get("Content-Length"),
+        String(bytes.byteLength),
+      );
+      assert.equal(
+        JSON.parse(gunzipSync(bytes).toString()).script,
+        "source".repeat(300),
+      );
+    }
+  });
+}
+
+for (const size of /** @type {(number | "utf8")[]} */ ([1023, 1024, "utf8"])) {
+  test(`gzip threshold uses UTF-8 bytes and preserves exact JSON: ${size}`, async () => {
+    const context = {
+      profile,
+      session: null,
+      user_agent: "browser",
+      url,
+      html: "",
+      document_id: profile,
+      started_at_ms: 0,
+      script_url: "https://shop.example/sensor",
+      script: "",
+      cookies: {},
+    };
+    const overhead = Buffer.byteLength(JSON.stringify(context));
+    const script =
+      size === "utf8" ? "é".repeat(500) : "x".repeat(size - overhead);
+    const expected = JSON.stringify({ ...context, script });
+    /** @type {RequestInit | undefined} */ let sent;
+    const client = new Nullgate("fake", {
+      fetch: async (target, init) => {
+        if (String(target).endsWith("/account"))
+          return Response.json({}, { headers: { "Accept-Encoding": "gzip" } });
+        sent = init;
+        return Response.json(sensorResponse);
+      },
+    });
+    await client.account();
+    await client
+      .session({ userAgent: "browser", profile })
+      .page(url, "", {
+        documentId: profile,
+        startedAtMs: 0,
+      })
+      .sensor({ script, scriptUrl: "/sensor", cookies: {} });
+    const compressed = size !== 1023;
+    assert.equal(
+      new Headers(sent?.headers).get("Content-Encoding"),
+      compressed ? "gzip" : null,
+    );
+    assert.equal(
+      compressed
+        ? gunzipSync(/** @type {Buffer} */ (sent?.body)).toString()
+        : sent?.body,
+      expected,
+    );
+    if (typeof size === "number")
+      assert.equal(Buffer.byteLength(expected), size);
+    else {
+      assert.ok(expected.length < 1024);
+      assert.ok(Buffer.byteLength(expected) >= 1024);
+    }
+  });
+}
+
+test("an error advertisement enables gzip but reporting and GET remain unchanged", async () => {
+  /** @type {RequestInit[]} */ const seen = [];
+  const client = new Nullgate("fake", {
+    fetch: async (target, init) => {
+      seen.push(init ?? {});
+      if (String(target).endsWith("/account"))
+        return Response.json(
+          { code: "invalid_request", message: "Invalid", request_id: "id" },
+          {
+            status: 400,
+            headers: { "Accept-Encoding": "gzip" },
+          },
+        );
+      return Response.json(sensorResponse);
+    },
+  });
+  await assert.rejects(client.account(), { code: "invalid_request" });
+  await client
+    .session({ userAgent: "browser" })
+    .page(url, html)
+    .sensor({ script: "source".repeat(300), cookies: {} });
+  await client.report("r".repeat(2000));
+  await assert.rejects(client.account(), { code: "invalid_request" });
+  assert.deepEqual(
+    seen.map((request) => new Headers(request.headers).get("Content-Encoding")),
+    [null, "gzip", null, null],
+  );
+  assert.equal(typeof seen[2]?.body, "string");
+  assert.equal(seen[3]?.body, undefined);
+});
+
+for (const status of [413, 415]) {
+  for (const failsAgain of [false, true]) {
+    test(`gzip ${status} retries identical JSON uncompressed once, repeated failure: ${failsAgain}`, async () => {
+      /** @type {RequestInit[]} */ const seen = [];
+      const client = new Nullgate("fake", {
+        fetch: async (target, init) => {
+          if (String(target).endsWith("/account"))
+            return Response.json(
+              {},
+              { headers: { "Accept-Encoding": "gzip" } },
+            );
+          seen.push(init ?? {});
+          if (seen.length === 1)
+            return new Response("proxy rejection", { status });
+          if (failsAgain && seen.length === 2)
+            return Response.json(
+              {
+                code: "invalid_request",
+                message: "Rejected",
+                request_id: "id",
+              },
+              { status },
+            );
+          return Response.json(sensorResponse, {
+            headers: { "Accept-Encoding": "gzip" },
+          });
+        },
+      });
+      await client.account();
+      const page = client.session({ userAgent: "browser" }).page(url, html);
+      const call = page.sensor({ script: "source".repeat(300), cookies: {} });
+      if (failsAgain) await assert.rejects(call, { status });
+      else await call;
+      assert.equal(seen.length, 2);
+      assert.equal(
+        gunzipSync(/** @type {Buffer} */ (seen[0]?.body)).toString(),
+        seen[1]?.body,
+      );
+      assert.equal(new Headers(seen[1]?.headers).has("Content-Length"), false);
+      assert.equal(
+        new Headers(seen[1]?.headers).has("Content-Encoding"),
+        false,
+      );
+      await page.sensor({ script: "source".repeat(300), cookies: {} });
+      assert.equal(
+        new Headers(seen[2]?.headers).get("Content-Encoding"),
+        status === 413 ? "gzip" : null,
+      );
+    });
+  }
+}
+
+for (const order of ["gzip-first", "script-first", "budget"]) {
+  test(`gzip and script recovery share three attempts: ${order}`, async () => {
+    /** @type {RequestInit[]} */ const seen = [];
+    const client = new Nullgate("fake", {
+      fetch: async (target, init) => {
+        if (String(target).endsWith("/account"))
+          return Response.json({}, { headers: { "Accept-Encoding": "gzip" } });
+        seen.push(init ?? {});
+        const attempt = seen.length - 1;
+        if (attempt === 1 && order === "budget")
+          return Response.json(
+            { code: "maintenance", message: "Wait", request_id: "id" },
+            { status: 503, headers: { "Retry-After": "0" } },
+          );
+        if (
+          (attempt === 1 && order === "gzip-first") ||
+          (attempt === 2 && order !== "gzip-first")
+        )
+          return new Response("proxy rejection", { status: 413 });
+        if (
+          (attempt === 1 && order === "script-first") ||
+          (attempt === 2 && order === "gzip-first") ||
+          (attempt === 3 && order === "budget")
+        )
+          return Response.json(
+            {
+              code: "script_required",
+              message: "Send the script for this document.",
+              request_id: "id",
+            },
+            { status: 428 },
+          );
+        return Response.json({ ...sensorResponse, script_retained: true });
+      },
+    });
+    await client.account();
+    const page = client
+      .session({ userAgent: "browser" })
+      .page(url, html.repeat(10));
+    await page.sensor({ script: "source", cookies: {} });
+    const call = page.sensor({
+      script: "source",
+      cookies: {},
+      inputs: [],
+      actions: [],
+    });
+    if (order === "budget")
+      await assert.rejects(call, { code: "script_required" });
+    else await call;
+    assert.equal(seen.length, 4);
+    const attempts = seen.slice(1).map((request) => ({
+      compressed:
+        new Headers(request.headers).get("Content-Encoding") === "gzip",
+      body: JSON.parse(
+        typeof request.body === "string"
+          ? request.body
+          : gunzipSync(/** @type {Buffer} */ (request.body)).toString(),
+      ),
+    }));
+    assert.deepEqual(
+      attempts.map(({ compressed, body }) => [
+        compressed,
+        body.script ?? "digest",
+      ]),
+      order === "gzip-first"
+        ? [
+            [true, "digest"],
+            [false, "digest"],
+            [false, "source"],
+          ]
+        : order === "script-first"
+          ? [
+              [true, "digest"],
+              [true, "source"],
+              [false, "source"],
+            ]
+          : [
+              [true, "digest"],
+              [true, "digest"],
+              [false, "digest"],
+            ],
+    );
+    for (const { body } of attempts) {
+      assert.deepEqual(body.inputs, []);
+      assert.deepEqual(body.actions, []);
+    }
+  });
+}

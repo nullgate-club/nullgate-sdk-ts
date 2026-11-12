@@ -50,7 +50,7 @@ console.log(sent.status);
 
 - Reporting: `await result.report()` or `await ng.report(requestId)` returns HTTP delivery status, not target acceptance or a refund.
 - Pass `scriptUrl` to choose a script. Relative URLs resolve against the page URL. Results preserve server header casing and order. Keep passing `script` to `page.sensor()`; the SDK omits retained scripts and retries once with the full script if required.
-- API transport: `new Nullgate(key, { fetch })` injects API HTTP only, never target requests or the ThreatMetrix socket.
+- API transport: `new Nullgate(key, { fetch })` injects API HTTP only and sees gzip bytes after server advertisement; bodies below 1024 bytes, reporting, and ThreatMetrix sockets stay unchanged.
 - Inputs: `prepareInputs([{ id: "password", value }])` returns `PreparedInput[]` accepted by sensor and FWCIM without sending raw passwords.
 - Cookies: `abckCounters(value)` returns `[limit, generation]`; `isEnough(value, responseCount)` checks ordinary-send eligibility, not target acceptance.
 - Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
