@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   type Action,
@@ -426,6 +426,9 @@ export class Session {
   readonly #options: SessionOptions & { profile: string };
   readonly #states = new Map<string, string>();
   readonly #pending = new Map<string, Promise<unknown>>();
+  #sensorRetention:
+    | { document: Document; session: string; digest: string }
+    | undefined;
   constructor(client: Nullgate, options: SessionOptions) {
     if (
       !options ||
@@ -467,19 +470,66 @@ export class Session {
     const pending = (this.#pending.get(product) ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
-        const data = await this.#client._call(
-          `/${product}/${fields.operation}`,
-          {
-            ...this._context(product, document),
-            ...Object.fromEntries(
-              Object.entries(fields).filter(([name]) => name !== "operation"),
-            ),
-          },
-        );
+        const body = {
+          ...this._context(product, document),
+          ...Object.fromEntries(
+            Object.entries(fields).filter(([name]) => name !== "operation"),
+          ),
+        };
+        const sensor = product === "akamai" && fields.operation === "sensor";
+        const digest =
+          sensor && typeof fields.script === "string"
+            ? createHash("sha256").update(fields.script, "utf8").digest("hex")
+            : undefined;
+        if (
+          digest !== undefined &&
+          this.#sensorRetention?.document === document &&
+          this.#sensorRetention.session === body.session &&
+          this.#sensorRetention.digest === digest
+        ) {
+          delete body.script;
+          body.script_digest = digest;
+        } else if (sensor) {
+          this.#sensorRetention = undefined;
+        }
+        let data: Record<string, unknown>;
+        try {
+          data = await this.#client._call(
+            `/${product}/${fields.operation}`,
+            body,
+          );
+        } catch (error) {
+          if (
+            !sensor ||
+            !(error instanceof NullgateError) ||
+            error.code !== "script_required"
+          )
+            throw error;
+          this.#sensorRetention = undefined;
+          delete body.script_digest;
+          body.script = fields.script;
+          data = await this.#client._call(
+            `/${product}/${fields.operation}`,
+            body,
+          );
+        }
         const result = finish(data, this.#client._reporter);
         if (typeof data.session !== "string" || !data.session)
           throw new NullgateError("protocol_error", "Missing response session");
         this.#states.set(product, data.session);
+        if (sensor) {
+          this.#sensorRetention =
+            data.script_retained === true && digest !== undefined
+              ? { document, session: data.session, digest }
+              : undefined;
+        } else if (
+          product === "akamai" &&
+          (fields.operation === "pixel" ||
+            this.#sensorRetention?.document !== document ||
+            this.#sensorRetention?.session !== data.session)
+        ) {
+          this.#sensorRetention = undefined;
+        }
         return result;
       });
     this.#pending.set(product, pending);

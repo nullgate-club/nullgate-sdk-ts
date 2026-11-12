@@ -628,3 +628,199 @@ for (const token of ["", "&t=", "&t=observed%2Btoken"]) {
       .sbsd({ script: "source", scriptUrl, cookies: {} });
   });
 }
+
+// Missing or stale script acknowledgements must never omit a script the server needs.
+const sourceDigest =
+  "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d";
+const sensorResponse =
+  wire.akamai.paths["/akamai/sensor"].post.responses["200"].content[
+    "application/json"
+  ].example;
+
+test("queued sensor calls replace only the acknowledged script with its digest", async () => {
+  /** @type {Record<string, unknown>[]} */ const bodies = [];
+  const session = new Nullgate("fake", {
+    fetch: async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({
+        ...sensorResponse,
+        session: "retained-session",
+        script_retained: true,
+      });
+    },
+  }).session({ userAgent: "browser", profile });
+  const page = session.page(url, html, {
+    documentId: profile,
+    startedAtMs: 1000,
+  });
+  await Promise.all([
+    page.sensor({ script: "source", cookies: { _abck: "first" } }),
+    page.sensor({ script: "source", cookies: { _abck: "later" } }),
+  ]);
+  const common = {
+    profile,
+    user_agent: "browser",
+    url,
+    html,
+    document_id: profile,
+    started_at_ms: 1000,
+    script_url: "https://shop.example/sensor",
+  };
+  assert.deepEqual(bodies, [
+    { ...common, session: null, script: "source", cookies: { _abck: "first" } },
+    {
+      ...common,
+      session: "retained-session",
+      script_digest: sourceDigest,
+      cookies: { _abck: "later" },
+    },
+  ]);
+});
+
+for (const retained of [undefined, false, "true"]) {
+  test(`sensor sends the full script without a true acknowledgement: ${retained}`, async () => {
+    /** @type {Record<string, unknown>[]} */ const bodies = [];
+    const page = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json({
+          ...sensorResponse,
+          ...(bodies.length === 1
+            ? { script_retained: true }
+            : { script_retained: retained }),
+        });
+      },
+    })
+      .session({ userAgent: "browser" })
+      .page(url, html);
+    for (let i = 0; i < 3; i++)
+      await page.sensor({ script: "source", cookies: {} });
+    assert.deepEqual(
+      bodies.map(({ script, script_digest }) => ({ script, script_digest })),
+      [
+        { script: "source", script_digest: undefined },
+        { script: undefined, script_digest: sourceDigest },
+        { script: "source", script_digest: undefined },
+      ],
+    );
+  });
+}
+
+for (const reset of [
+  "script",
+  "page",
+  "document",
+  "session",
+  "other-page",
+  "pixel",
+  "rotated-session",
+]) {
+  test(`sensor retention resets after ${reset} changes`, async () => {
+    /** @type {Record<string, unknown>[]} */ const bodies = [];
+    const session = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json({
+          ...sensorResponse,
+          session:
+            reset === "rotated-session" && bodies.length > 1
+              ? "rotated"
+              : "stable",
+          script_retained: true,
+        });
+      },
+    }).session({ userAgent: "browser" });
+    const original = session.page(url, html, { documentId: profile });
+    await original.sensor({ script: "source", cookies: {} });
+    let page = original;
+    if (reset === "page")
+      page = session.page(url, html, { documentId: profile });
+    if (reset === "document") page = session.page(url, html);
+    if (reset === "session")
+      page = new Nullgate("fake", {
+        fetch: async (_url, init) => {
+          bodies.push(JSON.parse(String(init?.body)));
+          return Response.json({ ...sensorResponse, script_retained: true });
+        },
+      })
+        .session({ userAgent: "browser" })
+        .page(url, html, { documentId: profile });
+    if (reset === "other-page")
+      await session.page(url, html).sensor({ script: "source", cookies: {} });
+    if (reset === "pixel") await original.pixel({ script: "source" });
+    if (reset === "rotated-session")
+      await original.sbsd({ script: "source", cookies: {} });
+    const script = reset === "script" ? "changed" : "source";
+    await page.sensor({ script, cookies: {} });
+    assert.equal(bodies.at(-1)?.script, script);
+    assert.equal(Object.hasOwn(bodies.at(-1) ?? {}, "script_digest"), false);
+    if (reset === "script") {
+      await page.sensor({ script: "source", cookies: {} });
+      assert.equal(bodies.at(-1)?.script, "source");
+    }
+  });
+}
+
+for (const failsAgain of [false, true]) {
+  test(`script_required retries the same sensor call once, repeated failure: ${failsAgain}`, async () => {
+    /** @type {Record<string, unknown>[]} */ const bodies = [];
+    const page = new Nullgate("fake", {
+      fetch: async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        if (bodies.length === 2 || (failsAgain && bodies.length === 3))
+          return Response.json(
+            {
+              code: "script_required",
+              message: "Send the script for this document.",
+              request_id: "missing-script",
+            },
+            { status: 428 },
+          );
+        return Response.json({ ...sensorResponse, script_retained: true });
+      },
+    })
+      .session({ userAgent: "browser" })
+      .page(url, html);
+    await page.sensor({ script: "source", cookies: {} });
+    const pending = page.sensor({
+      script: "source",
+      cookies: { _abck: "observed" },
+      inputs: [],
+      actions: [],
+    });
+    if (failsAgain)
+      await assert.rejects(pending, { code: "script_required", status: 428 });
+    else await pending;
+    assert.equal(bodies.length, 3);
+    const omitted = { ...bodies[1] };
+    delete omitted.script_digest;
+    assert.deepEqual(bodies[2], { ...omitted, script: "source" });
+    await page.sensor({ script: "source", cookies: {} });
+    assert.equal(bodies[3]?.script, failsAgain ? "source" : undefined);
+    assert.equal(
+      bodies[3]?.script_digest,
+      failsAgain ? undefined : sourceDigest,
+    );
+  });
+}
+
+test("an older server never causes sensor scripts to be omitted", async () => {
+  /** @type {Record<string, unknown>[]} */ const bodies = [];
+  const page = new Nullgate("fake", {
+    fetch: async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json(sensorResponse);
+    },
+  })
+    .session({ userAgent: "browser" })
+    .page(url, html);
+  await page.sensor({ script: "source", cookies: {} });
+  await page.sensor({ script: "source", cookies: {} });
+  assert.deepEqual(
+    bodies.map(({ script, script_digest }) => ({ script, script_digest })),
+    [
+      { script: "source", script_digest: undefined },
+      { script: "source", script_digest: undefined },
+    ],
+  );
+});
