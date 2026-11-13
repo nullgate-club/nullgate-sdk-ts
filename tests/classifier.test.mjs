@@ -123,3 +123,85 @@ for (const [name, data] of /** @type {const} */ ([
     });
   });
 }
+
+test("match posts raw images and queries in order without gzip", async () => {
+  /** @type {{ url: string, init: RequestInit | undefined }[]} */
+  const requests = [];
+  const ng = new Nullgate("fake", {
+    baseUrl: "http://localhost:8080",
+    fetch: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return Response.json({
+        results: [{ scores: [0.9, 0.8] }, { scores: [0, 1] }],
+      });
+    },
+  });
+  const view = new Uint8Array(second.buffer, 16, 1500);
+  assert.deepEqual(await ng.match({ images: [first, view], queries: labels }), {
+    results: [{ scores: [0.9, 0.8] }, { scores: [0, 1] }],
+  });
+  const [request] = requests;
+  assert.equal(request?.url, "http://localhost:8080/classifier/match");
+  assert.equal(request?.init?.method, "POST");
+  assert.deepEqual(request?.init?.headers, { Authorization: "Bearer fake" });
+  const form = await sentForm(request?.init);
+  assert.deepEqual([...new Set(form.keys())], ["image", "query"]);
+  assert.deepEqual(form.getAll("query"), labels);
+  assert.deepEqual(await sentImages(form), [[...first], [...view]]);
+});
+
+for (const [name, options] of /** @type {const} */ ([
+  ["no images", { images: [], queries: labels }],
+  ["an empty image", { images: [first, new Uint8Array()], queries: labels }],
+  ["more than 32 images", { images: Array(33).fill(first), queries: labels }],
+  ["a non-byte image", { images: ["image"], queries: labels }],
+  ["no queries", { images: first, queries: [] }],
+])) {
+  test(`match rejects ${name} without sending`, async () => {
+    const ng = new Nullgate("fake", {
+      fetch: async () => assert.fail("must not send"),
+    });
+    await assert.rejects(ng.match(/** @type {any} */ (options)), {
+      name: "NullgateError",
+      code: "invalid_request",
+      status: null,
+    });
+  });
+}
+
+for (const [name, body] of /** @type {const} */ ([
+  ["a missing result", '{"results":[]}'],
+  ["a missing score", '{"results":[{"scores":[0.5]}]}'],
+  ["a non-number score", '{"results":[{"scores":[0.5,"1"]}]}'],
+  ["a negative score", '{"results":[{"scores":[0.5,-0.1]}]}'],
+  ["a score above one", '{"results":[{"scores":[0.5,1.1]}]}'],
+  ["a non-finite score", '{"results":[{"scores":[0.5,1e400]}]}'],
+])) {
+  test(`match rejects ${name} as a protocol error`, async () => {
+    const ng = new Nullgate("fake", { fetch: async () => new Response(body) });
+    await assert.rejects(ng.match({ images: first, queries: labels }), {
+      code: "protocol_error",
+    });
+  });
+}
+
+test("match maps server errors to the public error", async () => {
+  const ng = new Nullgate("fake", {
+    fetch: async () =>
+      Response.json(
+        {
+          code: "insufficient_balance",
+          message: "Safe explanation",
+          request_id: "correlation",
+        },
+        { status: 402 },
+      ),
+  });
+  await assert.rejects(ng.match({ images: first, queries: labels }), {
+    name: "NullgateError",
+    code: "insufficient_balance",
+    message: "Safe explanation",
+    requestId: "correlation",
+    status: 402,
+  });
+});

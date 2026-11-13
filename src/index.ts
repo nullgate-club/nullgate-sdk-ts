@@ -17,6 +17,9 @@ export type {
   Classification,
   ClassificationResult,
   ClassifyOptions,
+  Match,
+  MatchOptions,
+  MatchResult,
 } from "./classifier.js";
 export {
   type Account,

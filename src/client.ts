@@ -22,6 +22,10 @@ import {
   type ClassifyOptions,
   classification,
   classifyBody,
+  type Match,
+  type MatchOptions,
+  matchBody,
+  matchResponse,
 } from "./classifier.js";
 import { findProtections } from "./discovery.js";
 import { local, NullgateError, retryDelay } from "./errors.js";
@@ -275,6 +279,15 @@ export class Nullgate {
       await this._call("/classifier/classify", form),
       form.getAll("image").length,
       options.labels.length,
+    );
+  }
+  /** Scores each image against `queries` independently. */
+  async match(options: MatchOptions): Promise<Match> {
+    const form = local(() => matchBody(options));
+    return matchResponse(
+      await this._call("/classifier/match", form),
+      form.getAll("image").length,
+      options.queries.length,
     );
   }
   /** True means HTTP delivery, not target acceptance or a refund. */

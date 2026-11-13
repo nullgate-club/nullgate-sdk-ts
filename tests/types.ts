@@ -1,4 +1,9 @@
-import { Nullgate, NullgateError, type TargetFetch } from "@nullgate/sdk";
+import {
+  type Match,
+  Nullgate,
+  NullgateError,
+  type TargetFetch,
+} from "@nullgate/sdk";
 
 const ng = new Nullgate("fake-key", {
   baseUrl: "http://localhost:8080",
@@ -41,5 +46,10 @@ void ng.classify({
   labels: ["cat", "dog"],
   model: "fast",
 });
+const match: Promise<Match> = ng.match({
+  images: [Buffer.from([1])],
+  queries: ["cat"],
+});
+void match;
 const error: Error = new NullgateError("invalid_page", "Invalid page");
 void error;
