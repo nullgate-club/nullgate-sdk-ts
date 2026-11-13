@@ -17,7 +17,7 @@ import { Page } from "./models.js";
 export interface AcicPowOptions {
   readonly challengeType: string;
   readonly html: string;
-  /** Caller-observed challenge start in Unix milliseconds. */
+  /** Unix milliseconds, within 10 minutes before or 1 minute after server time. */
   readonly startedAtMs?: number | null;
 }
 export interface AcicWafOptions {
