@@ -13,6 +13,11 @@ export type {
   FwcimInput,
   PreparedFwcimInput,
 } from "./amazon.js";
+export type {
+  Classification,
+  ClassificationResult,
+  ClassifyOptions,
+} from "./classifier.js";
 export {
   type Account,
   type ClientOptions,

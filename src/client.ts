@@ -17,6 +17,12 @@ import {
   prepareFwcim,
   prepareFwcimInputs,
 } from "./amazon.js";
+import {
+  type Classification,
+  type ClassifyOptions,
+  classification,
+  classifyBody,
+} from "./classifier.js";
 import { findProtections } from "./discovery.js";
 import { local, NullgateError, retryDelay } from "./errors.js";
 import {
@@ -261,6 +267,15 @@ export class Nullgate {
     return (await this._call(
       `/account/usage${query.size ? `?${query}` : ""}`,
     )) as unknown as Usage;
+  }
+  /** Scores each image against `labels`; a failed request costs nothing. */
+  async classify(options: ClassifyOptions): Promise<Classification> {
+    const body = local(() => classifyBody(options));
+    return classification(
+      await this._call("/classifier/classify", body),
+      (body.images as string[]).length,
+      options.labels.length,
+    );
   }
   /** True means HTTP delivery, not target acceptance or a refund. */
   async report(

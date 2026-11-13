@@ -35,5 +35,11 @@ const send: TargetFetch = async () => ({
 void page.threatmetrix({ send });
 void ng.account();
 void ng.usage({ interval: "day" });
+void ng.classify({ images: new Uint8Array([1]), labels: ["cat", "dog"] });
+void ng.classify({
+  images: [Buffer.from([1])],
+  labels: ["cat", "dog"],
+  model: "fast",
+});
 const error: Error = new NullgateError("invalid_page", "Invalid page");
 void error;
