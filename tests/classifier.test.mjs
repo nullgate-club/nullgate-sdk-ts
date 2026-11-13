@@ -1,27 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { gunzipSync } from "node:zlib";
 import { Nullgate } from "@nullgate/sdk";
 
 const labels = ["cat", "dog"];
 const first = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0xfb]);
 const second = new Uint8Array(2048).map((_, index) => index % 251);
 
-test("classify posts base64 images and labels and returns one result per image", async () => {
+/** @param {RequestInit | undefined} init */
+const sentForm = (init) =>
+  new Response(/** @type {FormData} */ (init?.body)).formData();
+/** @param {FormData} form */
+const sentImages = (form) =>
+  Promise.all(
+    form
+      .getAll("image")
+      .map(async (part) => [
+        ...new Uint8Array(await /** @type {File} */ (part).arrayBuffer()),
+      ]),
+  );
+
+test("classify posts raw images and labels as multipart and returns one result per image", async () => {
   /** @type {{ url: string, init: RequestInit | undefined }[]} */
   const requests = [];
   const ng = new Nullgate("fake", {
     baseUrl: "http://localhost:8080",
     fetch: async (url, init) => {
       requests.push({ url: String(url), init });
-      const { images } = JSON.parse(
-        typeof init?.body === "string"
-          ? init.body
-          : gunzipSync(/** @type {Uint8Array} */ (init?.body)).toString(),
-      );
+      const form = /** @type {FormData} */ (init?.body);
       return Response.json({
         model: "balanced",
-        results: images.map(() => ({ label: "dog", scores: [0.25, 0.75] })),
+        results: form
+          .getAll("image")
+          .map(() => ({ label: "dog", scores: [0.25, 0.75] })),
       });
     },
   });
@@ -42,30 +52,20 @@ test("classify posts base64 images and labels and returns one result per image",
   const [single, batch] = requests;
   assert.equal(single?.url, "http://localhost:8080/classifier/classify");
   assert.equal(single?.init?.method, "POST");
-  const headers = /** @type {Record<string, string>} */ (single?.init?.headers);
-  assert.equal(headers.Authorization, "Bearer fake");
-  assert.equal(headers["Content-Type"], "application/json");
-  assert.deepEqual(JSON.parse(String(single?.init?.body)), {
-    images: [Buffer.from(first).toString("base64")],
-    labels,
-  });
-  assert.equal(
-    /** @type {Record<string, string>} */ (batch?.init?.headers)[
-      "Content-Encoding"
-    ],
-    "gzip",
-  );
-  const sent = JSON.parse(
-    gunzipSync(/** @type {Uint8Array} */ (batch?.init?.body)).toString(),
-  );
-  assert.equal(sent.model, "precise");
-  assert.deepEqual(sent.labels, labels);
-  assert.deepEqual(
-    sent.images.map((/** @type {string} */ image) => [
-      ...Buffer.from(image, "base64"),
-    ]),
-    [[...first], [...view]],
-  );
+  // Only Authorization: fetch adds the multipart boundary, and nothing is gzipped.
+  assert.deepEqual(single?.init?.headers, { Authorization: "Bearer fake" });
+  assert.deepEqual(batch?.init?.headers, { Authorization: "Bearer fake" });
+
+  const one = await sentForm(single?.init);
+  assert.deepEqual([...new Set(one.keys())], ["image", "label"]);
+  assert.deepEqual(one.getAll("label"), labels);
+  assert.deepEqual(await sentImages(one), [[...first]]);
+
+  const two = await sentForm(batch?.init);
+  assert.deepEqual([...new Set(two.keys())], ["image", "label", "model"]);
+  assert.deepEqual(two.getAll("label"), labels);
+  assert.deepEqual(two.getAll("model"), ["precise"]);
+  assert.deepEqual(await sentImages(two), [[...first], [...view]]);
 });
 
 for (const [name, options] of /** @type {const} */ ([

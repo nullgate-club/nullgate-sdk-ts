@@ -270,10 +270,10 @@ export class Nullgate {
   }
   /** Scores each image against `labels`; a failed request costs nothing. */
   async classify(options: ClassifyOptions): Promise<Classification> {
-    const body = local(() => classifyBody(options));
+    const form = local(() => classifyBody(options));
     return classification(
-      await this._call("/classifier/classify", body),
-      (body.images as string[]).length,
+      await this._call("/classifier/classify", form),
+      form.getAll("image").length,
       options.labels.length,
     );
   }
@@ -316,11 +316,16 @@ export class Nullgate {
   /** @internal */
   async _call(
     path: string,
-    body?: Record<string, unknown>,
+    /** FormData is sent as multipart, never gzipped. */
+    body?: Record<string, unknown> | FormData,
     sensorScript?: string,
   ): Promise<Record<string, unknown>> {
     const signal = AbortSignal.timeout(Math.ceil(this.#timeout));
-    let json = body === undefined ? undefined : JSON.stringify(body);
+    const form = body instanceof FormData ? body : undefined;
+    let json =
+      body === undefined || form !== undefined
+        ? undefined
+        : JSON.stringify(body);
     let compressed: Buffer | undefined;
     let uncompressedFallback = false;
     let scriptFallback = false;
@@ -339,7 +344,8 @@ export class Nullgate {
             method: body === undefined ? "GET" : "POST",
             headers: {
               Authorization: `Bearer ${this.#key}`,
-              ...(body === undefined
+              // fetch sets the multipart boundary for FormData itself.
+              ...(json === undefined
                 ? {}
                 : { "Content-Type": "application/json" }),
               ...(useGzip
@@ -349,6 +355,7 @@ export class Nullgate {
                   }
                 : {}),
             },
+            ...(form === undefined ? {} : { body: form }),
             ...(json === undefined
               ? {}
               : {
@@ -405,6 +412,7 @@ export class Nullgate {
           value.code === "script_required" &&
           sensorScript !== undefined &&
           body !== undefined &&
+          !(body instanceof FormData) &&
           !scriptFallback &&
           attempt < 2
         ) {

@@ -22,9 +22,7 @@ export interface Classification {
 
 const maxImages = 32;
 
-export function classifyBody(
-  options: ClassifyOptions,
-): Record<string, unknown> {
+export function classifyBody(options: ClassifyOptions): FormData {
   if (options === null || typeof options !== "object")
     throw new TypeError("classify options must be an object");
   const images =
@@ -40,15 +38,13 @@ export function classifyBody(
     throw new TypeError("images cannot contain an empty image");
   if (!Array.isArray(options.labels) || options.labels.length < 2)
     throw new TypeError("labels must contain at least two labels");
-  return {
-    ...(options.model == null ? {} : { model: options.model }),
-    images: images.map((image: Uint8Array) =>
-      Buffer.from(image.buffer, image.byteOffset, image.byteLength).toString(
-        "base64",
-      ),
-    ),
-    labels: options.labels,
-  };
+  const form = new FormData();
+  // Blob copies only the view's own bytes; part order is result order.
+  for (const image of images)
+    form.append("image", new Blob([image as Uint8Array<ArrayBuffer>]));
+  for (const label of options.labels) form.append("label", label);
+  if (options.model != null) form.append("model", options.model);
+  return form;
 }
 
 export function classification(

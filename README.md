@@ -55,7 +55,7 @@ console.log(sent.status);
 - Cookies: `abckCounters(value)` returns `[limit, generation]`; `isEnough(value, responseCount)` checks ordinary-send eligibility, not target acceptance.
 - Amazon: `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns `metadata1` for your form.
 - ThreatMetrix: `await using tmx = await page.threatmetrix({ send })`, or pass `collector: { url, orgId, sessionId }` for [Kleinanzeigen](examples/kleinanzeigen.ts). Call `await tmx.pagehide()` when leaving.
-- Classifier: `await ng.classify({ images: await readFile("photo.jpg"), labels: ["cat", "dog"] })` returns `{ model, results }` with one `{ label, scores }` per image. Pass up to 32 JPEG, PNG, or WebP images as `Uint8Array`; `scores` follow `labels` order. Optional `model`: `"fast"`, `"balanced"`, or `"precise"`.
+- Classifier: `await ng.classify({ images: await readFile("photo.jpg"), labels: ["cat", "dog"] })` returns `{ model, results }` with one `{ label, scores }` per image. Pass up to 32 JPEG, PNG, or WebP images as `Uint8Array`; `scores` follow `labels` order. Optional `model`: `"fast"`, `"balanced"`, or `"precise"`. The SDK sends raw bytes as `multipart/form-data` without gzip, so an injected `fetch` receives a `FormData` body.
 - Errors: catch `NullgateError` and inspect `code`, `message`, `requestId`, and `status`. Maintenance retries are automatic.
 
 [Documentation](https://nullgate.club) · [Examples](examples) · Check: `npm run check`.
