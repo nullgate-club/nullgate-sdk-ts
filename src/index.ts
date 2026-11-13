@@ -9,7 +9,6 @@ export {
 } from "./akamai.js";
 export {
   type AcicPowOptions,
-  type AcicPowResult,
   type AcicWafOptions,
   type AcicWafResult,
   type AcicWafVerificationOptions,
@@ -46,7 +45,7 @@ export {
 export { NullgateError } from "./errors.js";
 export type { PageOptions } from "./models.js";
 export type { PagehideOptions, Profile } from "./profile.js";
-export type { FwcimResult, Request } from "./solution.js";
+export type { AcicPowResult, FwcimResult, Request } from "./solution.js";
 export type {
   Collector,
   TargetFetch,

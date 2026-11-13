@@ -17,10 +17,8 @@ import { Page } from "./models.js";
 export interface AcicPowOptions {
   readonly challengeType: string;
   readonly html: string;
-  readonly timeoutMs?: number;
-}
-export interface AcicPowResult {
-  readonly response: string;
+  /** Caller-observed challenge start in Unix milliseconds. */
+  readonly startedAtMs?: number | null;
 }
 export interface AcicWafOptions {
   readonly problem: Readonly<Record<string, unknown>>;

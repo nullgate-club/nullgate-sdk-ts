@@ -10,7 +10,6 @@ import {
 } from "./akamai.js";
 import {
   type AcicPowOptions,
-  type AcicPowResult,
   type AcicWafOptions,
   type AcicWafResult,
   documentFor,
@@ -41,6 +40,7 @@ import {
 } from "./models.js";
 import { Profile } from "./profile.js";
 import {
+  AcicPowResult,
   FwcimResult,
   type OperationOptions,
   type Reporter,
@@ -295,15 +295,33 @@ export class Nullgate {
     );
   }
   async acicPow(options: AcicPowOptions): Promise<AcicPowResult> {
+    if (
+      options.startedAtMs != null &&
+      (!Number.isInteger(options.startedAtMs) || options.startedAtMs < 0)
+    )
+      throw new NullgateError(
+        "invalid_request",
+        "startedAtMs must be a nonnegative integer",
+      );
     const data = await this._call(
       "/amazon/acic/pow",
-      { challenge_type: options.challengeType, html: options.html },
+      {
+        challenge_type: options.challengeType,
+        html: options.html,
+        ...(options.startedAtMs == null
+          ? {}
+          : { started_at_ms: options.startedAtMs }),
+      },
       undefined,
-      { timeoutMs: options.timeoutMs ?? 90_000, retry: false },
+      { retry: false },
     );
-    if (typeof data.response !== "string")
+    if (
+      typeof data.response !== "string" ||
+      typeof data.send_at !== "number" ||
+      !Number.isFinite(data.send_at)
+    )
       throw new NullgateError("protocol_error", "Malformed ACIC PoW response");
-    return { response: data.response };
+    return new AcicPowResult(data.response, data.send_at);
   }
   async acicWaf(options: AcicWafOptions): Promise<AcicWafResult> {
     const data = await this._call(
@@ -361,14 +379,9 @@ export class Nullgate {
     /** FormData is sent as multipart, never gzipped. */
     body?: Record<string, unknown> | FormData,
     sensorScript?: string,
-    options: { timeoutMs?: number; retry?: boolean } = {},
+    options: { retry?: boolean } = {},
   ): Promise<Record<string, unknown>> {
-    const timeout = options.timeoutMs ?? this.#timeout;
-    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 2_147_483_647)
-      throw new NullgateError(
-        "invalid_request",
-        "timeoutMs must be positive and within the timer range",
-      );
+    const timeout = this.#timeout;
     const signal = AbortSignal.timeout(Math.ceil(timeout));
     const form = body instanceof FormData ? body : undefined;
     let json =

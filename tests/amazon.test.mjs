@@ -303,21 +303,29 @@ test("ACIC sends compressed PoW and WAF bodies and returns solutions", async () 
       calls.push({ url: String(url), body });
       return Response.json(
         String(url).endsWith("/pow")
-          ? { response: '{"proof":1}', request_id: "one" }
+          ? { response: '{"proof":1}', send_at: 0, request_id: "one" }
           : { client_solution: [0, 2, 3, 6, 8], request_id: "two" },
       );
     },
   });
-  assert.deepEqual(
-    await client.acicPow({ challengeType: "POW", html: "h".repeat(2048) }),
-    { response: '{"proof":1}' },
-  );
+  const proof = await client.acicPow({
+    challengeType: "POW",
+    html: "h".repeat(2048),
+    startedAtMs: 1234,
+  });
+  assert.equal(proof.response, '{"proof":1}');
+  assert.equal(proof.sendAt, 0);
+  await proof.wait();
   const solution = await client.acicWaf({ problem });
   assert.deepEqual(solution, { clientSolution: [0, 2, 3, 6, 8] });
   assert.deepEqual(calls, [
     {
       url: "http://localhost:8080/amazon/acic/pow",
-      body: { challenge_type: "POW", html: "h".repeat(2048) },
+      body: {
+        challenge_type: "POW",
+        html: "h".repeat(2048),
+        started_at_ms: 1234,
+      },
     },
     { url: "http://localhost:8080/amazon/acic/waf", body: { problem } },
   ]);
@@ -339,7 +347,7 @@ test("ACIC sends compressed PoW and WAF bodies and returns solutions", async () 
   );
 });
 
-test("ACIC PoW uses a 90 second default timeout and accepts an override", async (t) => {
+test("ACIC PoW uses the client timeout and waits until the send time", async (t) => {
   /** @type {number[]} */
   const timeouts = [];
   const original = AbortSignal.timeout;
@@ -347,17 +355,22 @@ test("ACIC PoW uses a 90 second default timeout and accepts an override", async 
     timeouts.push(ms);
     return original(ms);
   });
+  const sendAt = (Date.now() + 30) / 1000;
   const client = new Nullgate("fake", {
     timeout: 5,
-    fetch: async () => Response.json({ response: "proof" }),
+    fetch: async (_url, init) => {
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        challenge_type: "POW",
+        html: "html",
+      });
+      return Response.json({ response: "proof", send_at: sendAt });
+    },
   });
-  await client.acicPow({ challengeType: "POW", html: "html" });
-  await client.acicPow({
-    challengeType: "POW",
-    html: "html",
-    timeoutMs: 120000,
-  });
-  assert.deepEqual(timeouts, [90000, 120000]);
+  const proof = await client.acicPow({ challengeType: "POW", html: "html" });
+  assert.equal(proof.sendAt, sendAt);
+  await proof.wait();
+  assert.ok(Date.now() >= sendAt * 1000);
+  assert.deepEqual(timeouts, [5000]);
 });
 
 for (const [status, code] of /** @type {const} */ ([

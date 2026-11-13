@@ -75,19 +75,10 @@ export function resultData(
   };
 }
 
-class TimedResult {
-  readonly headers: Readonly<Record<string, string>>;
+class WaitableResult {
   readonly sendAt: number;
-  readonly requestId: string;
-  readonly #reporter: Reporter;
-  constructor(data: ResultData, reporter: Reporter) {
-    this.#reporter = reporter;
-    this.headers = data.headers;
-    this.sendAt = data.sendAt;
-    this.requestId = data.requestId;
-  }
-  report(options: OperationOptions = {}): Promise<boolean> {
-    return this.#reporter(this.requestId, options);
+  constructor(sendAt: number) {
+    this.sendAt = sendAt;
   }
   async wait(options: OperationOptions = {}): Promise<void> {
     options.signal?.throwIfAborted();
@@ -100,6 +91,28 @@ class TimedResult {
       );
       remaining = this.sendAt * 1000 - Date.now();
     }
+  }
+}
+class TimedResult extends WaitableResult {
+  readonly headers: Readonly<Record<string, string>>;
+  readonly requestId: string;
+  readonly #reporter: Reporter;
+  constructor(data: ResultData, reporter: Reporter) {
+    super(data.sendAt);
+    this.#reporter = reporter;
+    this.headers = data.headers;
+    this.requestId = data.requestId;
+  }
+  report(options: OperationOptions = {}): Promise<boolean> {
+    return this.#reporter(this.requestId, options);
+  }
+}
+export class AcicPowResult extends WaitableResult {
+  readonly response: string;
+  constructor(response: string, sendAt: number) {
+    super(sendAt);
+    this.response = response;
+    Object.freeze(this);
   }
 }
 export class Request extends TimedResult {
