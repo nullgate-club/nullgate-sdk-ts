@@ -7,11 +7,17 @@ export {
   type PreparedInput,
   prepareInputs,
 } from "./akamai.js";
-export type {
-  FwcimAction,
-  FwcimGeometry,
-  FwcimInput,
-  PreparedFwcimInput,
+export {
+  type AcicPowOptions,
+  type AcicPowResult,
+  type AcicWafOptions,
+  type AcicWafResult,
+  type AcicWafVerificationOptions,
+  acicWafVerificationBody,
+  type FwcimAction,
+  type FwcimGeometry,
+  type FwcimInput,
+  type PreparedFwcimInput,
 } from "./amazon.js";
 export type {
   Classification,

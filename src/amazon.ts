@@ -14,6 +14,43 @@ import {
 } from "./akamai.js";
 import { Page } from "./models.js";
 
+export interface AcicPowOptions {
+  readonly challengeType: string;
+  readonly html: string;
+  readonly timeoutMs?: number;
+}
+export interface AcicPowResult {
+  readonly response: string;
+}
+export interface AcicWafOptions {
+  readonly problem: Readonly<Record<string, unknown>>;
+}
+export interface AcicWafResult {
+  readonly clientSolution: number[];
+}
+export interface AcicWafVerificationOptions {
+  readonly problem: {
+    readonly state: unknown;
+    readonly key: unknown;
+    readonly hmac_tag: unknown;
+  };
+  readonly solution: readonly number[];
+  readonly elapsedMs: number;
+  readonly locale: string;
+}
+
+/** Build the body that the caller sends to AWS. */
+export function acicWafVerificationBody(options: AcicWafVerificationOptions) {
+  return {
+    state: options.problem.state,
+    key: options.problem.key,
+    hmac_tag: options.problem.hmac_tag,
+    client_solution: options.solution,
+    metrics: { solve_time_millis: Math.trunc(options.elapsedMs) },
+    locale: options.locale,
+  };
+}
+
 /** FWCIM accepts event facts and local summaries, never an input value. */
 export interface FwcimAction {
   readonly type?: string;

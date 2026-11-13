@@ -9,6 +9,10 @@ import {
   validatePreparedInput,
 } from "./akamai.js";
 import {
+  type AcicPowOptions,
+  type AcicPowResult,
+  type AcicWafOptions,
+  type AcicWafResult,
   documentFor,
   type FwcimAction,
   type FwcimInput,
@@ -290,6 +294,31 @@ export class Nullgate {
       options.queries.length,
     );
   }
+  async acicPow(options: AcicPowOptions): Promise<AcicPowResult> {
+    const data = await this._call(
+      "/amazon/acic/pow",
+      { challenge_type: options.challengeType, html: options.html },
+      undefined,
+      { timeoutMs: options.timeoutMs ?? 90_000, retry: false },
+    );
+    if (typeof data.response !== "string")
+      throw new NullgateError("protocol_error", "Malformed ACIC PoW response");
+    return { response: data.response };
+  }
+  async acicWaf(options: AcicWafOptions): Promise<AcicWafResult> {
+    const data = await this._call(
+      "/amazon/acic/waf",
+      { problem: options.problem },
+      undefined,
+      { retry: false },
+    );
+    if (
+      !Array.isArray(data.client_solution) ||
+      !data.client_solution.every(Number.isInteger)
+    )
+      throw new NullgateError("protocol_error", "Malformed ACIC WAF response");
+    return { clientSolution: data.client_solution as number[] };
+  }
   /** True means HTTP delivery, not target acceptance or a refund. */
   async report(
     requestId: string,
@@ -332,8 +361,15 @@ export class Nullgate {
     /** FormData is sent as multipart, never gzipped. */
     body?: Record<string, unknown> | FormData,
     sensorScript?: string,
+    options: { timeoutMs?: number; retry?: boolean } = {},
   ): Promise<Record<string, unknown>> {
-    const signal = AbortSignal.timeout(Math.ceil(this.#timeout));
+    const timeout = options.timeoutMs ?? this.#timeout;
+    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 2_147_483_647)
+      throw new NullgateError(
+        "invalid_request",
+        "timeoutMs must be positive and within the timer range",
+      );
+    const signal = AbortSignal.timeout(Math.ceil(timeout));
     const form = body instanceof FormData ? body : undefined;
     let json =
       body === undefined || form !== undefined
@@ -383,7 +419,7 @@ export class Nullgate {
         );
         if (useGzip && (response.status === 413 || response.status === 415)) {
           if (response.status === 415) this.#gzip = false;
-          if (!uncompressedFallback && attempt < 2) {
+          if (options.retry !== false && !uncompressedFallback && attempt < 2) {
             uncompressedFallback = true;
             await response.arrayBuffer();
             continue;
@@ -438,11 +474,12 @@ export class Nullgate {
         }
         const retry = retryDelay(response.headers.get("Retry-After"));
         if (
+          options.retry !== false &&
           value.code === "maintenance" &&
           attempt < 2 &&
           retry !== undefined
         ) {
-          await sleep(Math.min(retry * 1000, this.#timeout), undefined, {
+          await sleep(Math.min(retry * 1000, timeout), undefined, {
             signal,
           });
           continue;

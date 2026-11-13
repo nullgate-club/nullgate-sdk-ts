@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Nullgate, prepareInputs } from "@nullgate/sdk";
+import { gunzipSync } from "node:zlib";
+import {
+  acicWafVerificationBody,
+  Nullgate,
+  prepareInputs,
+} from "@nullgate/sdk";
 
 const html =
   '<form id="signin"><input id="ap_email"><input name="nickname"><input id="password" type="password"></form><input id="outside">';
@@ -272,5 +277,114 @@ for (const { options, navigationStart, accepted } of [
     const pending = page.fwcim({ timing: { navigationStart } });
     if (accepted) assert.equal((await pending).metadata1, "opaque");
     else await assert.rejects(pending, { code: "invalid_inputs" });
+  });
+}
+
+test("ACIC sends compressed PoW and WAF bodies and returns solutions", async () => {
+  const problem = {
+    state: "state",
+    key: "key",
+    hmac_tag: "tag",
+    assets: { images: "x".repeat(2048) },
+  };
+  /** @type {{url: string, body: unknown}[]} */
+  const calls = [];
+  const client = new Nullgate("fake", {
+    baseUrl: "http://localhost:8080",
+    fetch: async (url, init) => {
+      assert.equal(init?.method, "POST");
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("authorization"), "Bearer fake");
+      assert.equal(headers.get("content-type"), "application/json");
+      assert.equal(headers.get("content-encoding"), "gzip");
+      const body = JSON.parse(
+        gunzipSync(/** @type {Uint8Array} */ (init?.body)).toString(),
+      );
+      calls.push({ url: String(url), body });
+      return Response.json(
+        String(url).endsWith("/pow")
+          ? { response: '{"proof":1}', request_id: "one" }
+          : { client_solution: [0, 2, 3, 6, 8], request_id: "two" },
+      );
+    },
+  });
+  assert.deepEqual(
+    await client.acicPow({ challengeType: "POW", html: "h".repeat(2048) }),
+    { response: '{"proof":1}' },
+  );
+  const solution = await client.acicWaf({ problem });
+  assert.deepEqual(solution, { clientSolution: [0, 2, 3, 6, 8] });
+  assert.deepEqual(calls, [
+    {
+      url: "http://localhost:8080/amazon/acic/pow",
+      body: { challenge_type: "POW", html: "h".repeat(2048) },
+    },
+    { url: "http://localhost:8080/amazon/acic/waf", body: { problem } },
+  ]);
+  assert.deepEqual(
+    acicWafVerificationBody({
+      problem,
+      solution: solution.clientSolution,
+      elapsedMs: 1234.8,
+      locale: "en-US",
+    }),
+    {
+      state: "state",
+      key: "key",
+      hmac_tag: "tag",
+      client_solution: [0, 2, 3, 6, 8],
+      metrics: { solve_time_millis: 1234 },
+      locale: "en-US",
+    },
+  );
+});
+
+test("ACIC PoW uses a 90 second default timeout and accepts an override", async (t) => {
+  /** @type {number[]} */
+  const timeouts = [];
+  const original = AbortSignal.timeout;
+  t.mock.method(AbortSignal, "timeout", (/** @type {number} */ ms) => {
+    timeouts.push(ms);
+    return original(ms);
+  });
+  const client = new Nullgate("fake", {
+    timeout: 5,
+    fetch: async () => Response.json({ response: "proof" }),
+  });
+  await client.acicPow({ challengeType: "POW", html: "html" });
+  await client.acicPow({
+    challengeType: "POW",
+    html: "html",
+    timeoutMs: 120000,
+  });
+  assert.deepEqual(timeouts, [90000, 120000]);
+});
+
+for (const [status, code] of /** @type {const} */ ([
+  [501, "unsupported"],
+  [503, "maintenance"],
+  [415, "invalid_request"],
+])) {
+  test(`ACIC maps ${code} without retrying a charged POST`, async () => {
+    let count = 0;
+    const client = new Nullgate("fake", {
+      fetch: async () => {
+        count++;
+        return Response.json(
+          { code, message: "failure", request_id: "req" },
+          { status, headers: { "Retry-After": "0" } },
+        );
+      },
+    });
+    await assert.rejects(
+      client.acicPow({ challengeType: "POW", html: "h".repeat(2048) }),
+      { code, status, requestId: "req" },
+    );
+    await assert.rejects(client.acicWaf({ problem: {} }), {
+      code,
+      status,
+      requestId: "req",
+    });
+    assert.equal(count, 2);
   });
 }

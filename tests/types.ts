@@ -1,4 +1,7 @@
 import {
+  type AcicPowResult,
+  type AcicWafResult,
+  acicWafVerificationBody,
   type Match,
   Nullgate,
   NullgateError,
@@ -51,5 +54,19 @@ const match: Promise<Match> = ng.match({
   queries: ["cat"],
 });
 void match;
+const proof: Promise<AcicPowResult> = ng.acicPow({
+  challengeType: "POW",
+  html: "<html></html>",
+});
+const problem = { state: "state", key: "key", hmac_tag: "tag", assets: {} };
+const selection: Promise<AcicWafResult> = ng.acicWaf({ problem });
+void proof;
+void selection;
+void acicWafVerificationBody({
+  problem,
+  solution: [1, 2],
+  elapsedMs: 1,
+  locale: "en-US",
+});
 const error: Error = new NullgateError("invalid_page", "Invalid page");
 void error;
