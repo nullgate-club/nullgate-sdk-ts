@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://nullgate.club/assets/avatar.svg" alt="nullgate" width="96">
+<img src="assets/readme.svg" alt="Nullgate" width="100%">
 
 # @nullgate/sdk
 
