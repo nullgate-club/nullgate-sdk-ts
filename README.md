@@ -85,6 +85,12 @@ Shared topics: [sessions](https://nullgate.club/en/sessions),
 
 ## 📦 Products
 
+### Akamai pixel iframe
+
+Use `await page.pixel({ script, iframe: true })` to model a hidden, restricted
+cross-origin frame. This option requires an updated server. Omit it for the default
+behavior and compatibility with older servers.
+
 ### Amazon FWCIM
 
 `await page.fwcim({ form: "#signin", timing, inputs: { ap_email: email } })` returns

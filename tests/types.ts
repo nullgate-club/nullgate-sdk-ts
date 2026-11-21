@@ -23,6 +23,9 @@ void page.sensor({
   inputs: { email: "user@example.com" },
 });
 void page.pixel({ script: "source", scriptUrl: "https://shop.example/pixel" });
+void page.pixel({ script: "source", iframe: true });
+// @ts-expect-error iframe accepts only booleans.
+void page.pixel({ script: "source", iframe: "true" });
 void page.sbsd({ script: "source", cookies: {} });
 void page.fwcim({
   form: "#login",

@@ -579,6 +579,46 @@ for (const { markup, options, expectedUrl, expectedChallenge } of [
       .pixel({ script: "source", ...options });
   });
 }
+for (const challenge of [undefined, "123"]) {
+  for (const iframe of [undefined, false, true]) {
+    test(`pixel sends iframe ${String(iframe)} with ${challenge === undefined ? "discovered" : "explicit"} challenge`, async () => {
+      const page = new Nullgate("fake", {
+        fetch: async (input, init) => {
+          assert.equal(new URL(String(input)).pathname, "/akamai/pixel");
+          const body = JSON.parse(String(init?.body));
+          assert.equal(Object.hasOwn(body, "iframe"), iframe === true);
+          if (iframe === true) assert.equal(body.iframe, true);
+          assert.equal(body.challenge, "123");
+          return Response.json(
+            wire.akamai.paths["/akamai/pixel"].post.responses["200"].content[
+              "application/json"
+            ].example,
+          );
+        },
+      })
+        .session({ userAgent: "browser" })
+        .page(url, html);
+      await page.pixel({
+        script: "source",
+        ...(challenge === undefined ? {} : { challenge }),
+        ...(iframe === undefined ? {} : { iframe }),
+      });
+    });
+  }
+}
+for (const iframe of [undefined, null, "true", 1]) {
+  test(`pixel rejects a nonboolean iframe ${JSON.stringify(iframe)}`, async () => {
+    const page = new Nullgate("fake", {
+      fetch: async () => assert.fail("must not send"),
+    })
+      .session({ userAgent: "browser" })
+      .page(url, html);
+    await assert.rejects(
+      page.pixel({ script: "source", iframe: /** @type {any} */ (iframe) }),
+      { code: "invalid_request" },
+    );
+  });
+}
 for (const challenge of ["", "-1", "1.5", 1]) {
   test(`pixel rejects a nondecimal explicit challenge ${JSON.stringify(challenge)}`, async () => {
     const page = new Nullgate("fake", {

@@ -90,6 +90,7 @@ export interface PixelOptions {
   readonly script: string;
   readonly scriptUrl?: string;
   readonly challenge?: string | null;
+  readonly iframe?: boolean;
 }
 export interface SbsdOptions {
   readonly script: string;
@@ -880,6 +881,8 @@ export class Page {
     });
   }
   async pixel(options: PixelOptions): Promise<Request> {
+    if ("iframe" in options && typeof options.iframe !== "boolean")
+      throw new NullgateError("invalid_request", "iframe must be a boolean");
     if (options.challenge != null) {
       if (
         typeof options.challenge !== "string" ||
@@ -907,6 +910,7 @@ export class Page {
         script_url: urls[0],
         script: options.script,
         challenge: options.challenge,
+        ...(options.iframe === true ? { iframe: true } : {}),
       });
     }
     const scriptUrl = this.#script("pixel", options);
@@ -920,6 +924,7 @@ export class Page {
       script_url: scriptUrl,
       script: options.script,
       challenge: candidate.challenge,
+      ...(options.iframe === true ? { iframe: true } : {}),
     });
   }
   async sbsd(options: SbsdOptions): Promise<Request> {
