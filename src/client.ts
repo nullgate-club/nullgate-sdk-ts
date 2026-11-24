@@ -32,6 +32,7 @@ import {
 } from "./classifier.js";
 import { findProtections } from "./discovery.js";
 import { local, NullgateError, retryDelay } from "./errors.js";
+import type { JsonValue } from "./models.js";
 import {
   Page as Document,
   httpURL,
@@ -52,6 +53,8 @@ import {
   prepareCollector,
   Target,
   type TargetFetch,
+  type TargetRequest,
+  type TargetResponse,
 } from "./threatmetrix.js";
 
 export interface ClientOptions {
@@ -117,6 +120,23 @@ export interface ThreatMetrixOptions {
   readonly proxy?: string | null;
   readonly inputs?: SensorOptions["inputs"];
   readonly actions?: readonly Action[] | null;
+}
+
+export interface ProtectOptions {
+  readonly script: string;
+  readonly send?: TargetFetch | undefined;
+  readonly clientToken?: string | undefined;
+  readonly sdkConfig?: Readonly<Record<string, JsonValue>> | undefined;
+  readonly jwtDeviceAttributes?: string | undefined;
+  readonly jwtAgentPayload?: string | undefined;
+  readonly tokenHost?: string | undefined;
+  readonly behavioral?: Readonly<Record<string, JsonValue>> | undefined;
+}
+export interface ProtectResult {
+  readonly data: string;
+  readonly sdkVersion: string;
+  readonly deviceId: string;
+  readonly requestId: string;
 }
 export interface UsageOptions {
   readonly interval?: string;
@@ -514,6 +534,35 @@ export class Nullgate {
     }
   }
   /** @internal */
+  async _sendTarget(
+    send: TargetFetch,
+    request: Omit<TargetRequest, "signal">,
+  ): Promise<TargetResponse> {
+    if (
+      request.url.includes(this.#key) ||
+      Object.entries(request.headers).some(
+        ([name, value]) =>
+          name.includes(this.#key) || value.includes(this.#key),
+      )
+    )
+      throw new NullgateError("protocol_error", "Malformed PingOne request");
+
+    const controller = new AbortController();
+    const { promise: timeout, reject } = Promise.withResolvers<never>();
+    const timer = setTimeout(() => {
+      reject(new NullgateError("timeout", "Target request timed out"));
+      controller.abort();
+    }, Math.ceil(this.#timeout));
+    try {
+      return await Promise.race([
+        timeout,
+        send({ ...request, signal: controller.signal }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  /** @internal */
   async _profile(
     start: Record<string, unknown>,
     send: TargetFetch,
@@ -562,6 +611,9 @@ export class Session {
   readonly #states = new Map<string, string>();
   readonly #pending = new Map<string, Promise<unknown>>();
   #sensorRetention:
+    | { document: Document; session: string; digest: string }
+    | undefined;
+  #pingoneRetention:
     | { document: Document; session: string; digest: string }
     | undefined;
   constructor(client: Nullgate, options: SessionOptions) {
@@ -653,6 +705,161 @@ export class Session {
         return result;
       });
     this.#pending.set(product, pending);
+    return pending;
+  }
+  /** @internal */
+  _protect(
+    document: Document,
+    options: ProtectOptions,
+  ): Promise<ProtectResult> {
+    const pending = (this.#pending.get("pingone") ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        const context = this._context("pingone", document);
+        const { url, html, document_id, started_at_ms, ...common } = context;
+        const body: Record<string, unknown> = {
+          ...common,
+          website: { url, html, document_id, started_at_ms },
+          script: options.script,
+          ...(options.sdkConfig === undefined
+            ? {}
+            : { sdk_config: options.sdkConfig }),
+          ...(options.tokenHost === undefined
+            ? {}
+            : { token_host: options.tokenHost }),
+        };
+        const digest = createHash("sha256")
+          .update(options.script)
+          .digest("hex");
+        if (
+          this.#pingoneRetention?.document === document &&
+          this.#pingoneRetention.session === body.session &&
+          this.#pingoneRetention.digest === digest
+        )
+          delete body.script;
+        let token: Record<string, unknown>;
+        if (options.clientToken !== undefined) {
+          token = { client_token: options.clientToken };
+        } else {
+          const prepared = await this.#client._call(
+            "/pingone/prepare",
+            body,
+            options.script,
+          );
+          const request = prepared.request;
+          if (
+            request === null ||
+            typeof request !== "object" ||
+            Array.isArray(request)
+          )
+            throw new NullgateError(
+              "protocol_error",
+              "Malformed PingOne request",
+            );
+          const value = request as Record<string, unknown>;
+          if (
+            value.role !== "pingone.token" ||
+            value.method !== "GET" ||
+            typeof value.url !== "string" ||
+            value.body !== null ||
+            value.credentials !== "include" ||
+            value.headers === null ||
+            typeof value.headers !== "object" ||
+            Array.isArray(value.headers) ||
+            !Object.values(value.headers).every(
+              (header) => typeof header === "string",
+            )
+          )
+            throw new NullgateError(
+              "protocol_error",
+              "Malformed PingOne request",
+            );
+          local(
+            () => httpURL(value.url as string, "request URL"),
+            "protocol_error",
+          );
+          if (typeof prepared.session !== "string" || !prepared.session)
+            throw new NullgateError(
+              "protocol_error",
+              "Missing response session",
+            );
+          this.#states.set("pingone", prepared.session);
+          body.session = prepared.session;
+          this.#pingoneRetention = {
+            document,
+            session: prepared.session,
+            digest,
+          };
+          const response = await this.#client._sendTarget(
+            options.send as TargetFetch,
+            {
+              role: value.role,
+              method: value.method,
+              url: value.url,
+              headers: value.headers as Record<string, string>,
+              body: null,
+              credentials: value.credentials,
+            },
+          );
+          if (response.status < 200 || response.status >= 300)
+            throw new NullgateError(
+              "target_error",
+              `PingOne token request failed with status ${response.status}`,
+              null,
+              response.status,
+            );
+          if (!(response.body instanceof Uint8Array))
+            throw new NullgateError(
+              "target_error",
+              "PingOne token response must contain bytes",
+            );
+          token = {
+            token_response: new TextDecoder("utf-8", { fatal: true }).decode(
+              response.body,
+            ),
+          };
+        }
+        const protectBody: Record<string, unknown> = {
+          ...body,
+          ...token,
+          ...(options.jwtDeviceAttributes === undefined
+            ? {}
+            : { jwt_device_attributes: options.jwtDeviceAttributes }),
+          ...(options.jwtAgentPayload === undefined
+            ? {}
+            : { jwt_agent_payload: options.jwtAgentPayload }),
+          ...(options.behavioral === undefined
+            ? {}
+            : { behavioral: options.behavioral }),
+        };
+        if (options.clientToken === undefined) delete protectBody.script;
+        const data = await this.#client._call(
+          "/pingone/protect",
+          protectBody,
+          options.script,
+        );
+        if (
+          typeof data.data !== "string" ||
+          typeof data.sdk_version !== "string" ||
+          typeof data.device_id !== "string" ||
+          typeof data.request_id !== "string" ||
+          typeof data.session !== "string" ||
+          !data.session
+        )
+          throw new NullgateError(
+            "protocol_error",
+            "Malformed PingOne response",
+          );
+        this.#states.set("pingone", data.session);
+        this.#pingoneRetention = { document, session: data.session, digest };
+        return {
+          data: data.data,
+          sdkVersion: data.sdk_version,
+          deviceId: data.device_id,
+          requestId: data.request_id,
+        };
+      });
+    this.#pending.set("pingone", pending);
     return pending;
   }
   /** @internal */
@@ -859,6 +1066,18 @@ export class Page {
         }
       });
     }, "invalid_inputs");
+  }
+  async protect(options: ProtectOptions): Promise<ProtectResult> {
+    if (
+      !options ||
+      typeof options.script !== "string" ||
+      (options.clientToken === undefined && typeof options.send !== "function")
+    )
+      throw new NullgateError(
+        "invalid_request",
+        "Provide script and a target send callback, or clientToken",
+      );
+    return this.#session._protect(this.#document, options);
   }
   async sensor(options: SensorOptions): Promise<Request> {
     const scriptUrl = this.#script("sensor", options);

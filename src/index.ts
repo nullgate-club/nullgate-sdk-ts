@@ -35,6 +35,8 @@ export {
   Nullgate,
   Page,
   type PixelOptions,
+  type ProtectOptions,
+  type ProtectResult,
   type SbsdOptions,
   type SensorOptions,
   Session,

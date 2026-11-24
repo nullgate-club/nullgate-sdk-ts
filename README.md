@@ -21,13 +21,14 @@ headers, and form values. It never sends anything to the target site. You send t
 prepared requests with your own HTTP client, such as `fetch`. It runs on Node.js 22.22
 or newer.
 
-| Product      | What you get                        | SDK method                                     | Guide                                                 |
-| ------------ | ----------------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
-| Akamai       | Sensor, pixel, and SBSD requests    | `page.sensor()`, `page.pixel()`, `page.sbsd()` | [Akamai](https://nullgate.club/en/akamai)             |
-| Amazon FWCIM | The `metadata1` form value          | `page.fwcim()`                                 | [Amazon](https://nullgate.club/en/amazon)             |
-| Amazon ACIC  | PoW and AWS WAF answers             | `ng.acicPow()`, `ng.acicWaf()`                 | [ACIC](https://nullgate.club/en/amazon-acic)          |
-| ThreatMetrix | A full profiling session            | `page.threatmetrix()`                          | [ThreatMetrix](https://nullgate.club/en/threatmetrix) |
-| Classifier   | Image labels and text-query matches | `ng.classify()`, `ng.match()`                  | [Classifier](https://nullgate.club/en/classifier)     |
+| Product         | What you get                        | SDK method                                     | Guide                                                 |
+| --------------- | ----------------------------------- | ---------------------------------------------- | ----------------------------------------------------- |
+| Akamai          | Sensor, pixel, and SBSD requests    | `page.sensor()`, `page.pixel()`, `page.sbsd()` | [Akamai](https://nullgate.club/en/akamai)             |
+| Amazon FWCIM    | The `metadata1` form value          | `page.fwcim()`                                 | [Amazon](https://nullgate.club/en/amazon)             |
+| Amazon ACIC     | PoW and AWS WAF answers             | `ng.acicPow()`, `ng.acicWaf()`                 | [ACIC](https://nullgate.club/en/amazon-acic)          |
+| ThreatMetrix    | A full profiling session            | `page.threatmetrix()`                          | [ThreatMetrix](https://nullgate.club/en/threatmetrix) |
+| PingOne Protect | An encoded `getData` value          | `page.protect()`                               | [Example](examples/pingone.ts)                        |
+| Classifier      | Image labels and text-query matches | `ng.classify()`, `ng.match()`                  | [Classifier](https://nullgate.club/en/classifier)     |
 
 Shared topics: [sessions](https://nullgate.club/en/sessions),
 [errors](https://nullgate.club/en/errors), and [billing](https://nullgate.club/en/billing).
