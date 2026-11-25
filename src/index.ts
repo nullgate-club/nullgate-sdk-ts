@@ -49,6 +49,17 @@ export { NullgateError } from "./errors.js";
 export type { PageOptions } from "./models.js";
 export type { PagehideOptions, Profile } from "./profile.js";
 export type { AcicPowResult, FwcimResult, Request } from "./solution.js";
+export {
+  Solver,
+  type SolverCookie,
+  SolverError,
+  type SolverOptions,
+  type SolverProduct,
+  type SolverRequest,
+  type SolverResponse,
+  type SolverResults,
+  type SolverTransport,
+} from "./solver.js";
 export type {
   Collector,
   TargetFetch,
